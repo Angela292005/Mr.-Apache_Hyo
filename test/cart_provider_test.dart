@@ -1,9 +1,82 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mr_apache_hyo/models/app_models.dart';
 import 'package:mr_apache_hyo/providers/cart_provider.dart';
+import 'package:mr_apache_hyo/services/firebase_service.dart';
+import 'package:mr_apache_hyo/utils/drive_image_url.dart';
 import 'package:mr_apache_hyo/utils/formatters.dart';
+import 'package:mr_apache_hyo/utils/product_image_url.dart';
 
 void main() {
+  test(
+    'convierte enlaces compartidos de Google Drive para mostrar imágenes',
+    () {
+      expect(
+        displayImageUrl(
+          'https://drive.google.com/file/d/abc123/view?usp=sharing',
+        ),
+        'https://drive.google.com/uc?export=view&id=abc123',
+      );
+      expect(
+        displayImageUrl('https://drive.google.com/open?id=abc123'),
+        'https://drive.google.com/uc?export=view&id=abc123',
+      );
+      expect(
+        displayImageUrl('https://example.com/pizza.jpg'),
+        'https://example.com/pizza.jpg',
+      );
+      expect(
+        validateImageUrl('enlace-inválido'),
+        'Ingresa un enlace de imagen válido.',
+      );
+      expect(
+        validateImageUrl('https://drive.google.com/file/d/abc123/view'),
+        isNull,
+      );
+    },
+  );
+
+  test('la carta inicial incluye productos y precios por categoría', () {
+    final products = FirebaseService.defaultProducts;
+    final pizza = products.singleWhere(
+      (product) => product.name == 'A lo Apache',
+    );
+
+    expect(products, hasLength(48));
+    expect(products.map((product) => product.id).toSet(), hasLength(48));
+    expect(pizza.category, 'Pizzas');
+    expect(pizza.prices['Personal'], 13.6);
+    expect(products.any((product) => product.category == 'Pastas'), isTrue);
+    expect(products.every((product) => product.available), isTrue);
+  });
+
+  test('asigna fotos ilustrativas a platos sin foto propia', () {
+    final products = FirebaseService.defaultProducts;
+    final pizza = products.singleWhere(
+      (product) => product.name == 'A lo Apache',
+    );
+    final drink = products.singleWhere(
+      (product) => product.name == 'Gaseosa 1 L',
+    );
+    final garlicBread = products.singleWhere(
+      (product) => product.name == 'Pan al ajo',
+    );
+    final pasta = products.singleWhere(
+      (product) => product.name == 'Lasagna a la Bolognesa',
+    );
+
+    expect(productImageUrl(pizza), startsWith('https://'));
+    expect(productImageUrl(drink), startsWith('https://'));
+    expect(productImageUrl(garlicBread), startsWith('https://'));
+    expect(productImageUrl(pasta), isEmpty);
+    expect(
+      productImageUrl(
+        pizza,
+        existingImage: 'https://drive.google.com/file/d/custom/view',
+      ),
+      'https://drive.google.com/uc?export=view&id=custom',
+    );
+  });
+
   test(
     'el carrito calcula subtotales y cantidades y permite quitar productos',
     () {

@@ -1,10 +1,10 @@
 name: mr_apache_hyo
 description: App de pedidos y delivery de Mr. Apache Pizzería, Huancayo.
 publish_to: 'none'
-version: 1.0.0+1
+version: 2.0.0+1
 
 environment:
-  sdk: ^3.13.5
+  sdk: ^3.11.5
 
 dependencies:
   flutter:
@@ -15,6 +15,9 @@ dependencies:
   firebase_auth: ^6.0.0
   firebase_core: ^4.0.0
   google_fonts: ^6.3.0
+  flutter_map: ^8.2.2
+  geolocator: ^14.0.2
+  latlong2: ^0.9.1
   intl: ^0.20.2
   provider: ^6.1.5
   url_launcher: ^6.3.2

@@ -1,13 +1,13 @@
 {
   "project_info": {
-    "project_number": "818323755792",
-    "project_id": "mrapache-hyo",
-    "storage_bucket": "mrapache-hyo.firebasestorage.app"
+    "project_number": "732309253599",
+    "project_id": "mrapache-23596",
+    "storage_bucket": "mrapache-23596.firebasestorage.app"
   },
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:818323755792:android:c7b976428762f8c1094b95",
+        "mobilesdk_app_id": "1:732309253599:android:02c8bdebcc63612957686a",
         "android_client_info": {
           "package_name": "com.company.MrApacheHyo"
         }
@@ -15,7 +15,7 @@
       "oauth_client": [],
       "api_key": [
         {
-          "current_key": "AIzaSyAP7fW3d2Hr88V55qXfQ5BIybVa9Zk8_NU"
+          "current_key": "AIzaSyA9r9jxySASRCwrKK4MTSWh6PkCFiEnbfk"
         }
       ],
       "services": {

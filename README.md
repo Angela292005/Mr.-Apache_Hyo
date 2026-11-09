@@ -78,9 +78,22 @@ Las reglas de Firestore completas están en [`firestore.rules`](./firestore.rule
 
 Para crear el primer administrador: registra una cuenta desde la app. En Firebase Console abre **Firestore → users → {uid de la cuenta}**, cambia `role` de `cliente` a `admin` y guarda. El UID se encuentra en **Authentication → Users**. No habilites escrituras públicas ni asignes el rol desde la app cliente.
 
-## 4. Datos iniciales y esquema
+## 4. Datos del catálogo y esquema
 
-Inicia sesión con una cuenta que tenga `role: "admin"`, abre **Perfil → Panel de administrador → Cargar datos iniciales**. La operación crea o actualiza documentos con IDs estables, así que puede repetirse sin duplicar locales y carta. El catálogo se puede editar después desde Productos, Sucursales y Promos. No reemplaza datos no relacionados.
+Inicia sesión con una cuenta que tenga `role: "admin"` y abre **Perfil → Panel de administrador**. Agrega productos manualmente desde **Productos** con el botón **+**; las sucursales y promociones también se administran desde sus pestañas. Los productos se guardan en Firestore y se pueden editar después desde la misma pantalla.
+
+### Imágenes de productos desde Google Drive
+
+Para agregar o cambiar la foto de un producto, inicia sesión como administrador y abre **Perfil → Panel de administrador → Productos → Nuevo producto** o **Editar**. El campo **Imagen del plato · enlace de Google Drive** aparece al inicio del formulario; al guardar, el enlace queda en el campo `image` del documento `products/{productId}`. Para usar Google Drive:
+
+1. Sube la foto del plato a Drive.
+2. En el archivo, abre **Compartir → Acceso general → Cualquier persona con el enlace** y deja el permiso en **Lector**.
+3. Copia el enlace para compartir y pégalo en **Imagen del plato · enlace de Google Drive**. La app convierte enlaces del tipo `drive.google.com/file/d/.../view` al formato de visualización y muestra una vista previa.
+4. Guarda el producto y confirma que la imagen cargue también en la carta.
+
+No pegues una ruta local ni un enlace que requiera iniciar sesión. Si la vista previa no carga, revisa que el permiso sea “Cualquier persona con el enlace” y que el enlace corresponda a un archivo de imagen. La aplicación solo lee las fotos públicas; no necesita acceso ni credenciales de tu cuenta de Drive.
+
+La app incluye fotos ilustrativas para algunas pizzas, gaseosas y pan al ajo procedentes de los diseños Stitch compartidos. Se muestran solo como imágenes provisionales cuando el producto no tiene una foto propia; puedes reemplazarlas por fotos reales mediante el enlace público de Drive.
 
 Esquema recomendado (los tiempos se guardan como `Timestamp` de Firestore):
 

@@ -128,9 +128,38 @@ class AuthGate extends StatelessWidget {
           }
           final profile = profileSnapshot.data!;
           if (!profile.exists) {
-            return StartupErrorScreen(
-              message:
-                  'No se encontró el perfil de tu cuenta. Contacta al local.',
+            return FutureBuilder<void>(
+              future: firebaseService.ensureClientProfile(),
+              builder: (context, ensureSnapshot) {
+                if (ensureSnapshot.hasError) {
+                  return StartupErrorScreen(
+                    message: ensureSnapshot.error.toString(),
+                  );
+                }
+                if (ensureSnapshot.connectionState != ConnectionState.done) {
+                  return const Scaffold(
+                    body: Center(child: CircularProgressIndicator()),
+                  );
+                }
+                return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+                  stream: firebaseService.firestore
+                      .collection('users')
+                      .doc(user.uid)
+                      .snapshots(),
+                  builder: (context, retryProfile) {
+                    if (retryProfile.hasError) {
+                      return StartupErrorScreen(message: retryProfile.error.toString());
+                    }
+                    if (!retryProfile.hasData || !retryProfile.data!.exists) {
+                      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+                    }
+                    return StoreShell(
+                      profile: retryProfile.data!.data()!,
+                      userId: user.uid,
+                    );
+                  },
+                );
+              },
             );
           }
           return StoreShell(profile: profile.data()!, userId: user.uid);
@@ -160,8 +189,8 @@ class StartupErrorScreen extends StatelessWidget {
             ),
             const SizedBox(height: 8),
             const Text(
-              'Configura Firebase para Android (google-services.json) '
-              'y vuelve a iniciar la aplicación.',
+              'Revisa la configuración de Firebase o el acceso a la cuenta '
+              'e intenta iniciar nuevamente la aplicación.',
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 12),

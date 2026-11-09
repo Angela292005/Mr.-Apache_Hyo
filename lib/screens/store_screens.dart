@@ -1,7 +1,12 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:intl/intl.dart';
+import 'package:latlong2/latlong.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -9,10 +14,15 @@ import '../core/theme/app_theme.dart';
 import '../main.dart' show firebaseService;
 import '../models/app_models.dart';
 import '../providers/cart_provider.dart';
+import 'pizza_customizer_screen.dart';
 import '../utils/formatters.dart'
     show isValidPersonName, money, normalizePersonName;
+import '../utils/drive_image_url.dart';
+import '../utils/product_image_url.dart';
 import '../widgets/app_logo.dart';
 import '../widgets/product_image.dart';
+
+final Set<String> _favoriteProductIds = <String>{};
 
 bool _validTime(String value) {
   final match = RegExp(r'^(\d{2}):(\d{2})$').firstMatch(value);
@@ -31,6 +41,53 @@ void showMessage(BuildContext context, String message, {bool error = false}) {
   );
 }
 
+class _EmptyState extends StatelessWidget {
+  const _EmptyState({required this.icon, required this.title, this.message});
+
+  final IconData icon;
+  final String title;
+  final String? message;
+
+  @override
+  Widget build(BuildContext context) => Center(
+    child: Padding(
+      padding: const EdgeInsets.all(28),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 68,
+            height: 68,
+            decoration: BoxDecoration(
+              color: const Color(0xFFFBE7E2),
+              borderRadius: BorderRadius.circular(22),
+            ),
+            child: Icon(icon, size: 32, color: AppTheme.red),
+          ),
+          const SizedBox(height: 16),
+          Text(
+            title,
+            textAlign: TextAlign.center,
+            style: Theme.of(
+              context,
+            ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800),
+          ),
+          if (message != null) ...[
+            const SizedBox(height: 6),
+            Text(
+              message!,
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                color: AppTheme.brown.withValues(alpha: 0.72),
+              ),
+            ),
+          ],
+        ],
+      ),
+    ),
+  );
+}
+
 String authError(Object error) {
   if (error is FirebaseAuthException) {
     return switch (error.code) {
@@ -45,7 +102,8 @@ String authError(Object error) {
       'wrong-password' ||
       'invalid-credential' => 'Correo o contraseña incorrectos.',
       'network-request-failed' => 'No hay conexión. Inténtalo nuevamente.',
-      'too-many-requests' => 'Hubo demasiados intentos. Espera unos minutos antes de volver a probar.',
+      'too-many-requests' =>
+        'Hubo demasiados intentos. Espera unos minutos antes de volver a probar.',
       _ => 'No se pudo completar la operación. Inténtalo nuevamente.',
     };
   }
@@ -59,6 +117,28 @@ String? _validateProfileName(String? value, String label) {
     return 'Usa solo letras, tildes, ñ y espacios.';
   }
   return null;
+}
+
+class _CartNavigationIcon extends StatelessWidget {
+  const _CartNavigationIcon({required this.selected});
+
+  final bool selected;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    width: 34,
+    height: 34,
+    decoration: BoxDecoration(
+      color: selected ? AppTheme.red : Colors.black87,
+      shape: BoxShape.circle,
+      border: Border.all(color: Colors.white, width: 1.5),
+    ),
+    child: Icon(
+      selected ? Icons.shopping_cart : Icons.shopping_cart_outlined,
+      size: 19,
+      color: Colors.white,
+    ),
+  );
 }
 
 class StoreShell extends StatefulWidget {
@@ -76,11 +156,16 @@ class _StoreShellState extends State<StoreShell> {
   @override
   Widget build(BuildContext context) {
     final isAdmin = widget.profile['role'] == 'admin';
+    final isCourier = widget.profile['role'] == 'repartidor';
     final pages = [
-      HomeScreen(onMenu: () => setState(() => _index = 1)),
+      HomeScreen(
+        onMenu: () => setState(() => _index = 2),
+        onCustomize: () => setState(() => _index = 1),
+      ),
+      PizzaCustomizerScreen(onAdded: () => setState(() => _index = 3)),
       const MenuScreen(),
-      const CartScreen(),
-      OrdersScreen(isAdmin: isAdmin),
+      CartScreen(onOrderSubmitted: () => setState(() => _index = 4)),
+      OrdersScreen(isAdmin: isAdmin, isCourier: isCourier),
       ProfileScreen(profile: widget.profile, isAdmin: isAdmin),
     ];
     return Scaffold(
@@ -93,15 +178,29 @@ class _StoreShellState extends State<StoreShell> {
           ],
         ),
         actions: [
-          if (_index != 2)
+          if (_index != 3)
             Consumer<CartProvider>(
               builder: (context, cart, _) => IconButton(
                 tooltip: 'Carrito',
-                onPressed: () => setState(() => _index = 2),
+                onPressed: () => setState(() => _index = 3),
                 icon: Badge(
                   isLabelVisible: cart.itemCount > 0,
                   label: Text('${cart.itemCount}'),
-                  child: const Icon(Icons.shopping_bag_outlined),
+                  child: Container(
+                    padding: const EdgeInsets.all(7),
+                    decoration: const BoxDecoration(
+                      color: AppTheme.red,
+                      shape: BoxShape.circle,
+                      boxShadow: [
+                        BoxShadow(color: Color(0x33000000), blurRadius: 6, offset: Offset(0, 2)),
+                      ],
+                    ),
+                    child: const Icon(
+                      Icons.shopping_bag_outlined,
+                      size: 22,
+                      color: Colors.white,
+                    ),
+                  ),
                 ),
               ),
             ),
@@ -117,16 +216,24 @@ class _StoreShellState extends State<StoreShell> {
             label: 'Inicio',
           ),
           NavigationDestination(
+            icon: Icon(Icons.tune),
+            label: 'Armar',
+            tooltip: 'Personalizar pizza',
+          ),
+          NavigationDestination(
             icon: Icon(Icons.local_pizza_outlined),
             label: 'Carta',
           ),
           NavigationDestination(
-            icon: Icon(Icons.shopping_cart_outlined),
+            icon: _CartNavigationIcon(selected: false),
+            selectedIcon: _CartNavigationIcon(selected: true),
             label: 'Carrito',
+            tooltip: 'Mi pedido',
           ),
           NavigationDestination(
             icon: Icon(Icons.receipt_long_outlined),
             label: 'Pedidos',
+            tooltip: 'Seguimiento de pedidos',
           ),
           NavigationDestination(
             icon: Icon(Icons.person_outline),
@@ -155,6 +262,7 @@ class _AuthScreenState extends State<AuthScreen> {
   final _confirmPassword = TextEditingController();
   bool _register = false;
   bool _busy = false;
+  String _accountRole = 'cliente';
   bool _obscure = true;
   bool _obscureConfirmation = true;
 
@@ -189,6 +297,7 @@ class _AuthScreenState extends State<AuthScreen> {
           telefono: _phone.text,
           correo: _email.text,
           password: _password.text,
+          role: _accountRole,
         );
       } else {
         await firebaseService.signIn(_email.text, _password.text);
@@ -233,8 +342,9 @@ class _AuthScreenState extends State<AuthScreen> {
         onSurfaceVariant: const Color(0xFFE4E4E7),
       ),
       scaffoldBackgroundColor: const Color(0xFF09090B),
-      textTheme: Theme.of(context).textTheme
-          .apply(bodyColor: Colors.white, displayColor: Colors.white),
+      textTheme: Theme.of(
+        context,
+      ).textTheme.apply(bodyColor: Colors.white, displayColor: Colors.white),
       iconTheme: const IconThemeData(color: Colors.white),
       textButtonTheme: TextButtonThemeData(
         style: TextButton.styleFrom(foregroundColor: AppTheme.amber),
@@ -300,6 +410,31 @@ class _AuthScreenState extends State<AuthScreen> {
                         ),
                         if (_register) ...[
                           const SizedBox(height: 12),
+                          const Text(
+                            'Tipo de cuenta',
+                            style: TextStyle(color: Color(0xFFE4E4E7)),
+                          ),
+                          const SizedBox(height: 8),
+                          SegmentedButton<String>(
+                            showSelectedIcon: false,
+                            segments: const [
+                              ButtonSegment(
+                                value: 'cliente',
+                                icon: Icon(Icons.person_outline),
+                                label: Text('Cliente'),
+                              ),
+                              ButtonSegment(
+                                value: 'repartidor',
+                                icon: Icon(Icons.delivery_dining),
+                                label: Text('Repartidor'),
+                              ),
+                            ],
+                            selected: {_accountRole},
+                            onSelectionChanged: (selection) => setState(
+                              () => _accountRole = selection.first,
+                            ),
+                          ),
+                          const SizedBox(height: 12),
                           TextFormField(
                             controller: _nombres,
                             textCapitalization: TextCapitalization.words,
@@ -342,8 +477,9 @@ class _AuthScreenState extends State<AuthScreen> {
                           ),
                           validator: (value) =>
                               value == null ||
-                                  !RegExp(r'^[^@]+@[^@]+\.[^@]+$')
-                                      .hasMatch(value.trim())
+                                  !RegExp(
+                                    r'^[^@]+@[^@]+\.[^@]+$',
+                                  ).hasMatch(value.trim())
                               ? 'Ingresa un correo válido.'
                               : null,
                         ),
@@ -470,9 +606,30 @@ class _AuthScreenState extends State<AuthScreen> {
   );
 }
 
-class HomeScreen extends StatelessWidget {
-  const HomeScreen({super.key, required this.onMenu});
+class HomeScreen extends StatefulWidget {
+  const HomeScreen({
+    super.key,
+    required this.onMenu,
+    required this.onCustomize,
+  });
   final VoidCallback onMenu;
+  final VoidCallback onCustomize;
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  String _category = 'Todos';
+
+  static const _categories = [
+    'Todos',
+    'Combos',
+    'Pizzas',
+    'Pastas',
+    'Carnes y parrillas',
+    'Bebidas',
+  ];
 
   @override
   Widget build(BuildContext context) => StreamBuilder<List<Branch>>(
@@ -487,201 +644,416 @@ class HomeScreen extends StatelessWidget {
         return const Center(child: CircularProgressIndicator());
       }
       final branches = snapshot.data!;
-      return ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          Container(
-            padding: const EdgeInsets.all(22),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(22),
-              gradient: const LinearGradient(
-                colors: [AppTheme.red, Color(0xFF8E1717)],
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
+      return StreamBuilder<List<Product>>(
+        stream: firebaseService.products(),
+        builder: (context, productSnapshot) {
+          if (productSnapshot.hasError) {
+            return Center(
+              child: Text(
+                'No se pudo cargar la carta: ${productSnapshot.error}',
               ),
-            ),
-            child: const Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  '¡Qué gusto verte!',
-                  style: TextStyle(color: Colors.white70),
-                ),
-                SizedBox(height: 8),
-                Text(
-                  'Pizza recién hecha,\npara compartir.',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 27,
-                    fontWeight: FontWeight.w900,
+            );
+          }
+          if (!productSnapshot.hasData) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          final products = productSnapshot.data!
+              .where((product) => product.available)
+              .where(
+                (product) =>
+                    _category == 'Todos' || product.category == _category,
+              )
+              .toList();
+          final feature = productSnapshot.data!.firstWhere(
+            (product) => product.category == 'Combos' && product.available,
+            orElse: () => productSnapshot.data!.first,
+          );
+          final selectedBranch = branches.isEmpty
+              ? null
+              : branches.firstWhere(
+                  (branch) =>
+                      branch.id ==
+                      context.watch<CartProvider>().selectedBranchId,
+                  orElse: () => branches.first,
+                );
+
+          return ListView(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 28),
+            children: [
+              TextField(
+                readOnly: true,
+                onTap: widget.onMenu,
+                decoration: InputDecoration(
+                  prefixIcon: const Icon(Icons.search),
+                  hintText: 'Buscar pizzas, combos y promociones...',
+                  suffixIcon: IconButton(
+                    tooltip: 'Ver la carta',
+                    onPressed: widget.onMenu,
+                    icon: const Icon(Icons.tune),
                   ),
                 ),
-                SizedBox(height: 8),
-                Text(
-                  'La favorita en Huancayo, un rinconcito en San Carlos',
-                  style: TextStyle(color: Colors.white),
+              ),
+              const SizedBox(height: 10),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 10,
                 ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 18),
-          Text('Elige tu local', style: Theme.of(context).textTheme.titleLarge),
-          if (branches.isEmpty)
-            const Card(
-              child: Padding(
-                padding: EdgeInsets.all(16),
-                child: Text(
-                  'El administrador debe cargar los locales iniciales.',
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFEF1ED),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: const Row(
+                  children: [
+                    Icon(Icons.local_fire_department, color: AppTheme.orange),
+                    SizedBox(width: 8),
+                    Expanded(
+                      child: Text('Horno de leña encendido en Huancayo'),
+                    ),
+                    Text(
+                      '30–40 min',
+                      style: TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                  ],
                 ),
               ),
-            )
-          else
-            Consumer<CartProvider>(
-              builder: (context, cart, _) {
-                final id = branches.any((b) => b.id == cart.selectedBranchId)
-                    ? cart.selectedBranchId
-                    : branches.first.id;
-                return DropdownButtonFormField<String>(
-                  initialValue: id,
-                  decoration: const InputDecoration(
-                    labelText: 'Sucursal de recojo o delivery',
+              const SizedBox(height: 16),
+              Container(
+                padding: const EdgeInsets.all(18),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(22),
+                  gradient: const LinearGradient(
+                    colors: [Color(0xFF971F0C), Color(0xFFB93822)],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
                   ),
-                  items: branches
-                      .map(
-                        (branch) => DropdownMenuItem(
-                          value: branch.id,
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Row(
+                      children: [
+                        Icon(
+                          Icons.local_offer,
+                          color: AppTheme.amber,
+                          size: 18,
+                        ),
+                        SizedBox(width: 6),
+                        Text(
+                          'RECOMENDADO',
+                          style: TextStyle(color: Colors.white),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      feature.name,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 25,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    Text(
+                      feature.description,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(color: Colors.white),
+                    ),
+                    const SizedBox(height: 14),
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        Expanded(
                           child: Text(
-                            branch.name,
-                            overflow: TextOverflow.ellipsis,
+                            'Desde ${money(feature.startingPrice)}',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.w800,
+                              fontSize: 18,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 16),
+                        FilledButton.tonalIcon(
+                          style: FilledButton.styleFrom(
+                            foregroundColor: AppTheme.brown,
+                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                          ),
+                          onPressed: () => _chooseProduct(context, feature),
+                          icon: const Icon(Icons.shopping_bag_outlined, size: 18, color: AppTheme.brown),
+                          label: const Text('Pedir ahora'),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 18),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      'Explorar menú',
+                      style: Theme.of(context).textTheme.titleLarge,
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: widget.onMenu,
+                    child: Text('Ver todo (${productSnapshot.data!.length})'),
+                  ),
+                ],
+              ),
+              SizedBox(
+                height: 46,
+                child: ListView(
+                  scrollDirection: Axis.horizontal,
+                  children: _categories
+                      .map(
+                        (category) => Padding(
+                          padding: const EdgeInsets.only(right: 8),
+                          child: ChoiceChip(
+                            label: Text(category),
+                            selected: _category == category,
+                            onSelected: (_) =>
+                                setState(() => _category = category),
                           ),
                         ),
                       )
                       .toList(),
-                  onChanged: cart.selectBranch,
-                );
-              },
-            ),
-          if (branches.isNotEmpty)
-            Builder(
-              builder: (context) {
-                final cart = context.watch<CartProvider>();
-                final branch = branches.firstWhere(
-                  (item) => item.id == cart.selectedBranchId,
-                  orElse: () => branches.first,
-                );
-                return Card(
-                  child: ListTile(
-                    leading: Icon(
-                      Icons.circle,
-                      size: 14,
-                      color: branch.isOpen ? Colors.green : Colors.red,
-                    ),
-                    title: Text(
-                      branch.isOpen ? 'Abierto ahora' : 'Cerrado por ahora',
-                    ),
-                    subtitle: Text(
-                      'Atención: ${branch.openingTime}–${branch.closingTime}. '
-                      'Almuerzo: lunes a viernes, ${branch.lunchOpeningTime}–'
-                      '${branch.lunchClosingTime}.',
-                    ),
-                  ),
-                );
-              },
-            ),
-          const SizedBox(height: 12),
-          FilledButton.icon(
-            onPressed: onMenu,
-            icon: const Icon(Icons.local_pizza),
-            label: const Text('Pedir ahora'),
-          ),
-          const SizedBox(height: 8),
-          OutlinedButton.icon(
-            onPressed: () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => const CompanyScreen()),
-            ),
-            icon: const Icon(Icons.place_outlined),
-            label: const Text('Nosotros, horarios y contacto'),
-          ),
-          const SizedBox(height: 12),
-          StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-            stream: firebaseService.promotions(),
-            builder: (context, promotionsSnapshot) {
-              if (promotionsSnapshot.hasError) {
-                return Text(
-                  'No se pudieron cargar promociones: ${promotionsSnapshot.error}',
-                );
-              }
-              final promotions = promotionsSnapshot.data?.docs ?? [];
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+                ),
+              ),
+              const SizedBox(height: 14),
+              Row(
                 children: [
-                  Text(
-                    'Promociones',
-                    style: Theme.of(context).textTheme.titleLarge,
+                  Expanded(
+                    child: Text(
+                      _category == 'Todos' ? 'Las más pedidas' : _category,
+                      style: Theme.of(context).textTheme.titleLarge,
+                    ),
                   ),
-                  if (promotions.isEmpty)
-                    const Card(
-                      child: ListTile(
-                        leading: Icon(
-                          Icons.local_offer_outlined,
-                          color: AppTheme.red,
-                        ),
-                        title: Text('Combos desde S/ 19.00'),
-                        subtitle: Text(
-                          'Revisa la carta para conocer nuestros combos.',
+                  const Text('Huancayo style'),
+                ],
+              ),
+              ...products
+                  .take(5)
+                  .map((product) => ProductTile(product: product)),
+              const SizedBox(height: 12),
+              SmartRecommendationCard(products: productSnapshot.data!),
+              const SizedBox(height: 12),
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(14),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Tu sucursal',
+                        style: TextStyle(
+                          fontWeight: FontWeight.w800,
+                          fontSize: 16,
                         ),
                       ),
-                    ),
-                  ...promotions.map((promotion) {
-                    final data = promotion.data();
-                    return Card(
-                      child: ListTile(
-                        leading: const Icon(
-                          Icons.local_offer_outlined,
-                          color: AppTheme.red,
-                        ),
-                        title: Text(data['name'] as String? ?? 'Promoción'),
-                        subtitle: Text(
-                          '${data['description'] ?? ''} · '
-                          '${money((data['price'] as num?) ?? 0)}',
+                      const SizedBox(height: 4),
+                      Text(
+                        'Elige el local para preparar tu pedido.',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: AppTheme.brown.withValues(alpha: 0.7),
                         ),
                       ),
-                    );
-                  }),
-                ],
-              );
-            },
-          ),
-          StreamBuilder<List<Product>>(
-            stream: firebaseService.products(),
-            builder: (context, products) {
-              if (!products.hasData) return const SizedBox.shrink();
-              final pizzas = products.data!
-                  .where(
-                    (product) =>
-                        product.category == 'Pizzas' && product.available,
-                  )
-                  .take(3)
-                  .toList();
-              if (pizzas.isEmpty) return const SizedBox.shrink();
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const SizedBox(height: 12),
-                  Text(
-                    'Pizzas para hoy',
-                    style: Theme.of(context).textTheme.titleLarge,
+                      const SizedBox(height: 10),
+                      if (branches.isEmpty)
+                        const Text(
+                          'El administrador debe cargar las sucursales.',
+                        )
+                      else
+                        Consumer<CartProvider>(
+                          builder: (context, cart, _) =>
+                              DropdownButtonFormField<String>(
+                                isExpanded: true,
+                                initialValue: selectedBranch!.id,
+                                decoration: const InputDecoration(
+                                  labelText: 'Sucursal',
+                                ),
+                                items: branches
+                                    .map(
+                                      (branch) => DropdownMenuItem(
+                                        value: branch.id,
+                                        child: Text(
+                                          branch.name,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                    )
+                                    .toList(),
+                                onChanged: cart.selectBranch,
+                              ),
+                        ),
+                      if (selectedBranch != null)
+                        ListTile(
+                          contentPadding: EdgeInsets.zero,
+                          minLeadingWidth: 20,
+                          leading: Icon(
+                            selectedBranch.isOpen
+                                ? Icons.check_circle
+                                : Icons.schedule,
+                            size: 18,
+                            color: selectedBranch.isOpen
+                                ? Colors.green
+                                : AppTheme.red,
+                          ),
+                          title: Text(
+                            selectedBranch.isOpen
+                                ? 'Abierto ahora'
+                                : 'Cerrado por ahora',
+                          ),
+                          subtitle: Text(
+                            '${selectedBranch.openingTime}–${selectedBranch.closingTime}',
+                          ),
+                        ),
+                    ],
                   ),
-                  ...pizzas.map((product) => ProductTile(product: product)),
-                ],
-              );
-            },
-          ),
-        ],
+                ),
+              ),
+              FilledButton.tonalIcon(
+                onPressed: widget.onCustomize,
+                icon: const Icon(Icons.tune),
+                label: const Text('Arma tu pizza a tu estilo'),
+              ),
+              OutlinedButton.icon(
+                onPressed: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const CompanyScreen()),
+                ),
+                icon: const Icon(Icons.place_outlined),
+                label: const Text('Nosotros, horarios y contacto'),
+              ),
+            ],
+          );
+        },
       );
     },
   );
+}
+
+class SmartRecommendationCard extends StatelessWidget {
+  const SmartRecommendationCard({super.key, required this.products});
+
+  final List<Product> products;
+
+  @override
+  Widget build(BuildContext context) => StreamBuilder<List<OrderRecord>>(
+        stream: firebaseService.orders(admin: false),
+        builder: (context, snapshot) {
+          final available = products.where((product) => product.available).toList();
+          if (available.isEmpty) return const SizedBox.shrink();
+
+          final quantities = <String, int>{};
+          for (final order in snapshot.data ?? const <OrderRecord>[]) {
+            for (final item in order.items) {
+              final productId = item['productId']?.toString() ?? '';
+              if (productId.isEmpty) continue;
+              final quantity = (item['quantity'] as num?)?.toInt() ?? 1;
+              quantities[productId] = (quantities[productId] ?? 0) + quantity;
+            }
+          }
+
+          final previouslyOrdered = quantities.entries.toList()
+            ..sort((a, b) => b.value.compareTo(a.value));
+          Product? recommendation;
+          var reason = 'Una opción muy pedida para repetir hoy';
+          if (previouslyOrdered.isNotEmpty) {
+            for (final entry in previouslyOrdered) {
+              final match = available.where((product) => product.id == entry.key);
+              if (match.isNotEmpty) {
+                recommendation = match.first;
+                break;
+              }
+            }
+            reason = 'Lo elegiste en tus pedidos anteriores';
+          }
+
+          recommendation ??= available.firstWhere(
+            (product) => product.category.toLowerCase().contains('combos'),
+            orElse: () => available.firstWhere(
+              (product) => product.category.toLowerCase().contains('pizza'),
+              orElse: () => available.first,
+            ),
+          );
+          reason = quantities[recommendation.id] != null
+              ? reason
+              : 'Una opción muy pedida para repetir hoy';
+          final recommendedProduct = recommendation;
+
+          return Container(
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                colors: [Color(0xFF31170F), Color(0xFF9D2818)],
+              ),
+              borderRadius: BorderRadius.circular(18),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Row(
+                children: [
+                  Container(
+                    width: 50,
+                    height: 50,
+                    decoration: const BoxDecoration(
+                      color: Color(0xFFF6BE3F),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(Icons.auto_awesome, color: Colors.white, size: 28),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'TU PRÓXIMO ANTOJO',
+                          style: TextStyle(
+                            color: Color(0xFFF6BE3F),
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 0.7,
+                          ),
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          recommendedProduct.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                        Text(
+                          reason,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(color: Colors.white70, fontSize: 12),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  IconButton.filledTonal(
+                    tooltip: 'Añadir recomendación',
+                    style: IconButton.styleFrom(
+                      backgroundColor: Colors.white,
+                      foregroundColor: AppTheme.red,
+                    ),
+                    onPressed: () => _chooseProduct(context, recommendedProduct),
+                    icon: const Icon(Icons.add_shopping_cart),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      );
 }
 
 class MenuScreen extends StatefulWidget {
@@ -694,6 +1066,7 @@ class MenuScreen extends StatefulWidget {
 class _MenuScreenState extends State<MenuScreen> {
   final _search = TextEditingController();
   String _category = 'Todos';
+  bool _favoritesOnly = false;
 
   static const _categories = [
     'Todos',
@@ -716,13 +1089,26 @@ class _MenuScreenState extends State<MenuScreen> {
     children: [
       Padding(
         padding: const EdgeInsets.fromLTRB(16, 10, 16, 6),
-        child: TextField(
-          controller: _search,
-          onChanged: (_) => setState(() {}),
-          decoration: const InputDecoration(
-            prefixIcon: Icon(Icons.search),
-            hintText: 'Buscar en la carta',
-          ),
+        child: Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: _search,
+                onChanged: (_) => setState(() {}),
+                decoration: const InputDecoration(
+                  prefixIcon: Icon(Icons.search),
+                  hintText: 'Buscar en la carta',
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            IconButton.filledTonal(
+              tooltip: _favoritesOnly ? 'Mostrar toda la carta' : 'Mostrar favoritos',
+              isSelected: _favoritesOnly,
+              onPressed: () => setState(() => _favoritesOnly = !_favoritesOnly),
+              icon: Icon(_favoritesOnly ? Icons.favorite : Icons.favorite_border),
+            ),
+          ],
         ),
       ),
       SizedBox(
@@ -763,13 +1149,18 @@ class _MenuScreenState extends State<MenuScreen> {
             final products = snapshot.data!
                 .where((item) => item.available)
                 .where(
+                  (item) => !_favoritesOnly || _favoriteProductIds.contains(item.id),
+                )
+                .where(
                   (item) => _category == 'Todos' || item.category == _category,
                 )
                 .where((item) => item.name.toLowerCase().contains(query))
                 .toList();
             if (products.isEmpty) {
-              return const Center(
-                child: Text('No encontramos productos. Prueba otra búsqueda.'),
+              return const _EmptyState(
+                icon: Icons.search_off,
+                title: 'No encontramos productos',
+                message: 'Prueba con otra búsqueda o categoría.',
               );
             }
             return ListView.builder(
@@ -785,34 +1176,124 @@ class _MenuScreenState extends State<MenuScreen> {
   );
 }
 
-class ProductTile extends StatelessWidget {
+class ProductTile extends StatefulWidget {
   const ProductTile({super.key, required this.product});
   final Product product;
 
   @override
-  Widget build(BuildContext context) => Card(
-    clipBehavior: Clip.antiAlias,
-    child: ListTile(
-      contentPadding: const EdgeInsets.all(12),
-      leading: ProductImage(url: product.image, size: 68),
-      title: Text(
-        product.name,
-        style: const TextStyle(fontWeight: FontWeight.bold),
+  State<ProductTile> createState() => _ProductTileState();
+}
+
+class _ProductTileState extends State<ProductTile> {
+  late String _selectedSize;
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedSize = _defaultSize(widget.product);
+  }
+
+  static String _defaultSize(Product product) {
+    for (final size in const ['Personal', 'Mediana', 'Familiar']) {
+      if (product.prices.containsKey(size)) return size;
+    }
+    return product.prices.keys.first;
+  }
+
+  bool get _isPizza => widget.product.category.toLowerCase().contains('pizza');
+
+  List<String> get _pizzaSizes => const ['Personal', 'Mediana', 'Familiar']
+      .where((size) => widget.product.prices.containsKey(size))
+      .toList();
+
+  void _addSelectedProduct() {
+    context.read<CartProvider>().add(widget.product, size: _selectedSize);
+    showMessage(context, '${widget.product.name} agregado al carrito.');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isFavorite = _favoriteProductIds.contains(widget.product.id);
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        children: [
+          ListTile(
+            contentPadding: const EdgeInsets.all(12),
+            leading: ProductImage(url: productImageUrl(widget.product), size: 68),
+            title: Text(
+              widget.product.name,
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+            subtitle: Text(
+              '${widget.product.description}\nDesde ${money(widget.product.startingPrice)}',
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+            ),
+            isThreeLine: true,
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                IconButton(
+                  tooltip: isFavorite ? 'Quitar de favoritos' : 'Agregar a favoritos',
+                  onPressed: () => setState(() {
+                    if (isFavorite) {
+                      _favoriteProductIds.remove(widget.product.id);
+                    } else {
+                      _favoriteProductIds.add(widget.product.id);
+                    }
+                  }),
+                  color: isFavorite ? AppTheme.red : Colors.grey.shade600,
+                  icon: Icon(isFavorite ? Icons.favorite : Icons.favorite_border),
+                ),
+                IconButton.filled(
+                  tooltip: 'Agregar al carrito',
+                  style: IconButton.styleFrom(
+                    backgroundColor: AppTheme.red,
+                    foregroundColor: Colors.white,
+                  ),
+                  onPressed: () => _isPizza
+                      ? _addSelectedProduct()
+                      : _chooseProduct(context, widget.product),
+                  icon: const Icon(Icons.add_shopping_cart, color: Colors.white),
+                ),
+              ],
+            ),
+            onTap: () => _isPizza
+                ? _addSelectedProduct()
+                : _chooseProduct(context, widget.product),
+          ),
+          if (_isPizza && _pizzaSizes.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+              child: Row(
+                children: _pizzaSizes.map((size) {
+                  final selected = _selectedSize == size;
+                  return Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 3),
+                      child: ChoiceChip(
+                        selected: selected,
+                        showCheckmark: false,
+                        label: Center(child: Text(size, maxLines: 1)),
+                        labelStyle: TextStyle(
+                          fontSize: 12,
+                          fontWeight: selected ? FontWeight.w800 : FontWeight.w600,
+                          color: selected ? Colors.white : AppTheme.brown,
+                        ),
+                        selectedColor: AppTheme.red,
+                        side: BorderSide(color: selected ? AppTheme.red : Colors.grey.shade300),
+                        onSelected: (_) => setState(() => _selectedSize = size),
+                      ),
+                    ),
+                  );
+                }).toList(),
+              ),
+            ),
+        ],
       ),
-      subtitle: Text(
-        '${product.description}\nDesde ${money(product.startingPrice)}',
-        maxLines: 3,
-        overflow: TextOverflow.ellipsis,
-      ),
-      isThreeLine: true,
-      trailing: IconButton.filled(
-        tooltip: 'Agregar al carrito',
-        onPressed: () => _chooseProduct(context, product),
-        icon: const Icon(Icons.add_shopping_cart),
-      ),
-      onTap: () => _chooseProduct(context, product),
-    ),
-  );
+    );
+  }
 }
 
 Future<void> _chooseProduct(BuildContext context, Product product) async {
@@ -823,33 +1304,59 @@ Future<void> _chooseProduct(BuildContext context, Product product) async {
     builder: (dialogContext) => StatefulBuilder(
       builder: (context, refresh) => AlertDialog(
         title: Text(product.name),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(product.description),
-            const SizedBox(height: 12),
-            DropdownButtonFormField<String>(
-              initialValue: size,
-              decoration: const InputDecoration(labelText: 'Tamaño'),
-              items: product.prices.entries
-                  .map(
-                    (entry) => DropdownMenuItem(
-                      value: entry.key,
-                      child: Text('${entry.key} · ${money(entry.value)}'),
-                    ),
-                  )
-                  .toList(),
-              onChanged: (value) => refresh(() => size = value ?? size),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: note,
-              decoration: const InputDecoration(
-                labelText: 'Nota especial (opcional)',
-                hintText: 'Ej. sin aceituna',
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(product.description),
+              const SizedBox(height: 12),
+              if (product.category.toLowerCase().contains('pizza') &&
+                  product.prices.keys.any((key) => ['Personal', 'Mediana', 'Familiar'].contains(key))) ...[
+                const Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text('Elige tu tamaño', style: TextStyle(fontWeight: FontWeight.w800)),
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  children: ['Personal', 'Mediana', 'Familiar'].where(product.prices.containsKey).map((label) {
+                    final selected = size == label;
+                    return ChoiceChip(
+                      selected: selected,
+                      label: Text('$label · ${money(product.prices[label]!)}'),
+                      selectedColor: AppTheme.amber,
+                      onSelected: (_) => refresh(() => size = label),
+                    );
+                  }).toList(),
+                ),
+              ] else
+              DropdownButtonFormField<String>(
+                isExpanded: true,
+                initialValue: size,
+                decoration: const InputDecoration(labelText: 'Tamaño'),
+                items: product.prices.entries
+                    .map(
+                      (entry) => DropdownMenuItem(
+                        value: entry.key,
+                        child: Text(
+                          '${entry.key} · ${money(entry.value)}',
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    )
+                    .toList(),
+                onChanged: (value) => refresh(() => size = value ?? size),
               ),
-            ),
-          ],
+              const SizedBox(height: 12),
+              TextField(
+                controller: note,
+                decoration: const InputDecoration(
+                  labelText: 'Nota especial (opcional)',
+                  hintText: 'Ej. sin aceituna',
+                ),
+              ),
+            ],
+          ),
         ),
         actions: [
           TextButton(
@@ -875,163 +1382,339 @@ Future<void> _chooseProduct(BuildContext context, Product product) async {
   note.dispose();
 }
 
-class CartScreen extends StatelessWidget {
-  const CartScreen({super.key});
+class CartScreen extends StatefulWidget {
+  const CartScreen({super.key, required this.onOrderSubmitted});
+
+  final VoidCallback onOrderSubmitted;
 
   @override
-  Widget build(BuildContext context) => Consumer<CartProvider>(
-    builder: (context, cart, _) {
-      if (cart.items.isEmpty) {
-        return const Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(Icons.shopping_bag_outlined, size: 64, color: AppTheme.red),
-              SizedBox(height: 12),
-              Text('Tu carrito está vacío.'),
-              Text('Explora la carta y agrega algo rico.'),
-            ],
-          ),
-        );
-      }
-      return StreamBuilder<List<Branch>>(
-        stream: firebaseService.branches(),
-        builder: (context, branchSnapshot) {
-          final branches = branchSnapshot.data ?? const <Branch>[];
-          return Column(
-            children: [
-              Expanded(
-                child: ListView(
-                  padding: const EdgeInsets.all(12),
-                  children: [
-                    if (branchSnapshot.hasError)
-                      Text('Error al obtener locales: ${branchSnapshot.error}'),
-                    ...cart.items.map(
-                      (item) => Card(
-                        child: Padding(
-                          padding: const EdgeInsets.all(12),
-                          child: Row(
-                            children: [
-                              ProductImage(url: item.product.image, size: 62),
-                              const SizedBox(width: 12),
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                      item.product.name,
-                                      style: const TextStyle(
-                                        fontWeight: FontWeight.bold,
-                                      ),
-                                    ),
-                                    Text(
-                                      '${item.size} · ${money(item.unitPrice)}',
-                                    ),
-                                    if (item.notes.isNotEmpty)
-                                      Text('Nota: ${item.notes}'),
-                                    Row(
-                                      children: [
-                                        IconButton(
-                                          visualDensity: VisualDensity.compact,
-                                          onPressed: () => cart.setQuantity(
-                                            item,
-                                            item.quantity - 1,
-                                          ),
-                                          icon: const Icon(
-                                            Icons.remove_circle_outline,
-                                          ),
-                                        ),
-                                        Text('${item.quantity}'),
-                                        IconButton(
-                                          visualDensity: VisualDensity.compact,
-                                          onPressed: () => cart.setQuantity(
-                                            item,
-                                            item.quantity + 1,
-                                          ),
-                                          icon: const Icon(
-                                            Icons.add_circle_outline,
-                                          ),
-                                        ),
-                                        const Spacer(),
-                                        Text(
-                                          money(item.subtotal),
-                                          style: const TextStyle(
-                                            fontWeight: FontWeight.bold,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ],
-                                ),
-                              ),
-                              IconButton(
-                                tooltip: 'Quitar del carrito',
-                                onPressed: () => cart.remove(item),
-                                icon: const Icon(Icons.delete_outline),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                    Align(
-                      alignment: Alignment.centerRight,
-                      child: TextButton(
-                        onPressed: () => _confirmAction(
-                          context,
-                          '¿Vaciar carrito?',
-                          'Se quitarán todos los productos.',
-                          () async => cart.clear(),
-                        ),
-                        child: const Text('Vaciar carrito'),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              SafeArea(
-                top: false,
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(18, 8, 18, 14),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
+  State<CartScreen> createState() => _CartScreenState();
+}
+
+class _CartScreenState extends State<CartScreen> {
+  String _deliveryType = 'Delivery';
+
+  @override
+  Widget build(BuildContext context) {
+    final screenContext = context;
+    return Consumer<CartProvider>(
+      builder: (context, cart, _) {
+        if (cart.items.isEmpty) {
+          return const _EmptyState(
+            icon: Icons.shopping_bag_outlined,
+            title: 'Tu carrito está vacío',
+            message: 'Explora la carta y agrega algo rico.',
+          );
+        }
+        return StreamBuilder<List<Branch>>(
+          stream: firebaseService.branches(),
+          builder: (context, branchSnapshot) {
+            final branches = branchSnapshot.data ?? const <Branch>[];
+            final branch = branches.isEmpty
+                ? null
+                : branches.firstWhere(
+                    (item) => item.id == cart.selectedBranchId,
+                    orElse: () => branches.first,
+                  );
+            return Column(
+              children: [
+                Expanded(
+                  child: ListView(
+                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
                     children: [
                       Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          const Text('Subtotal'),
-                          Text(
-                            money(cart.subtotal),
-                            style: const TextStyle(fontWeight: FontWeight.bold),
+                          const Icon(Icons.shopping_bag, color: AppTheme.red),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'Tu pedido',
+                                  style: Theme.of(context)
+                                      .textTheme
+                                      .headlineSmall
+                                      ?.copyWith(fontWeight: FontWeight.w800),
+                                ),
+                                Text(
+                                  '${cart.itemCount} delicias listas para el horno',
+                                ),
+                              ],
+                            ),
+                          ),
+                          Tooltip(
+                            message:
+                                '${cart.itemCount} productos en el carrito',
+                            child: Chip(
+                              avatar: const Icon(
+                                Icons.shopping_bag_outlined,
+                                size: 16,
+                              ),
+                              label: Text('${cart.itemCount}'),
+                              visualDensity: VisualDensity.compact,
+                            ),
                           ),
                         ],
                       ),
-                      const SizedBox(height: 8),
-                      FilledButton(
-                        onPressed: branches.isEmpty
-                            ? null
-                            : () => _openCheckout(context, branches),
-                        child: const Text('Continuar con el pedido'),
+                      const SizedBox(height: 14),
+                      SegmentedButton<String>(
+                        showSelectedIcon: false,
+                        segments: const [
+                          ButtonSegment(
+                            value: 'Delivery',
+                            icon: Icon(Icons.delivery_dining),
+                            label: Text('Delivery'),
+                          ),
+                          ButtonSegment(
+                            value: 'Recojo',
+                            icon: Icon(Icons.storefront_outlined),
+                            label: Text('Recojo'),
+                          ),
+                        ],
+                        selected: {_deliveryType},
+                        onSelectionChanged: (selection) =>
+                            setState(() => _deliveryType = selection.first),
+                      ),
+                      if (branchSnapshot.hasError)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          child: Text(
+                            'Error al obtener locales: ${branchSnapshot.error}',
+                          ),
+                        ),
+                      if (branch != null)
+                        Card(
+                          color: const Color(0xFFFEF1ED),
+                          child: ListTile(
+                            leading: const Icon(
+                              Icons.location_on_outlined,
+                              color: AppTheme.red,
+                            ),
+                            title: Text(
+                              _deliveryType == 'Delivery'
+                                  ? 'Sucursal de despacho'
+                                  : 'Sucursal de recojo',
+                            ),
+                            subtitle: Text('${branch.name}\n${branch.address}'),
+                            isThreeLine: true,
+                            trailing: const Icon(Icons.expand_more),
+                            onTap: branches.isEmpty
+                                ? null
+                                : () async {
+                                    final selected =
+                                        await showModalBottomSheet<Branch>(
+                                          context: context,
+                                          builder: (context) => SafeArea(
+                                            child: ListView(
+                                              shrinkWrap: true,
+                                              children: branches
+                                                  .map(
+                                                    (item) => ListTile(
+                                                      title: Text(item.name),
+                                                      subtitle: Text(
+                                                        item.address,
+                                                      ),
+                                                      onTap: () =>
+                                                          Navigator.pop(
+                                                            context,
+                                                            item,
+                                                          ),
+                                                    ),
+                                                  )
+                                                  .toList(),
+                                            ),
+                                          ),
+                                        );
+                                    if (selected != null) {
+                                      cart.selectBranch(selected.id);
+                                    }
+                                  },
+                          ),
+                        ),
+                      ...cart.items.map(
+                        (item) => Card(
+                          clipBehavior: Clip.antiAlias,
+                          child: Padding(
+                            padding: const EdgeInsets.all(12),
+                            child: Column(
+                              children: [
+                                Row(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    ProductImage(
+                                      url: productImageUrl(item.product),
+                                      size: 78,
+                                    ),
+                                    const SizedBox(width: 12),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            item.product.name,
+                                            style: const TextStyle(
+                                              fontWeight: FontWeight.w800,
+                                            ),
+                                          ),
+                                          Text(
+                                            '${item.size} · ${money(item.unitPrice)}',
+                                            style: const TextStyle(
+                                              color: AppTheme.orange,
+                                              fontWeight: FontWeight.w700,
+                                            ),
+                                          ),
+                                          if (item.notes.isNotEmpty)
+                                            Text(
+                                              item.notes,
+                                              maxLines: 2,
+                                              overflow: TextOverflow.ellipsis,
+                                            ),
+                                        ],
+                                      ),
+                                    ),
+                                    IconButton(
+                                      tooltip: 'Eliminar producto',
+                                      onPressed: () => cart.remove(item),
+                                      icon: const Icon(Icons.delete_outline),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 8),
+                                Row(
+                                  children: [
+                                    Text(
+                                      money(item.subtotal),
+                                      style: const TextStyle(
+                                        color: AppTheme.red,
+                                        fontWeight: FontWeight.w800,
+                                        fontSize: 18,
+                                      ),
+                                    ),
+                                    const Spacer(),
+                                    IconButton.filledTonal(
+                                      visualDensity: VisualDensity.compact,
+                                      onPressed: () => cart.setQuantity(
+                                        item,
+                                        item.quantity - 1,
+                                      ),
+                                      icon: const Icon(Icons.remove),
+                                    ),
+                                    Padding(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 10,
+                                      ),
+                                      child: Text(
+                                        '${item.quantity}',
+                                        style: const TextStyle(
+                                          fontWeight: FontWeight.w800,
+                                        ),
+                                      ),
+                                    ),
+                                    IconButton.filled(
+                                      visualDensity: VisualDensity.compact,
+                                      onPressed: () => cart.setQuantity(
+                                        item,
+                                        item.quantity + 1,
+                                      ),
+                                      icon: const Icon(Icons.add),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: TextButton(
+                          onPressed: () => _confirmAction(
+                            context,
+                            '¿Vaciar carrito?',
+                            'Se quitarán todos los productos.',
+                            () async => cart.clear(),
+                          ),
+                          child: const Text('Vaciar carrito'),
+                        ),
                       ),
                     ],
                   ),
                 ),
-              ),
-            ],
-          );
-        },
-      );
-    },
-  );
+                SafeArea(
+                  top: false,
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(18, 8, 18, 14),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            const Text('Subtotal'),
+                            Text(
+                              money(cart.subtotal),
+                              style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 4),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            const Text('Delivery'),
+                            Text(
+                              _deliveryType == 'Recojo'
+                                  ? 'Gratis'
+                                  : cart.subtotal >= 50
+                                  ? 'Gratis'
+                                  : money(3),
+                            ),
+                          ],
+                        ),
+                        const Divider(height: 18),
+                        const SizedBox(height: 8),
+                        FilledButton(
+                          onPressed: branches.isEmpty
+                              ? null
+                              : () => _openCheckout(
+                                  screenContext,
+                                  branches,
+                                  onOrderSubmitted: widget.onOrderSubmitted,
+                                  initialType: _deliveryType == 'Recojo'
+                                      ? 'Recojo en tienda'
+                                      : 'Delivery',
+                                ),
+                          child: const Text('Continuar con el pedido'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
 }
 
-Future<void> _openCheckout(BuildContext context, List<Branch> branches) async {
-  final cart = context.read<CartProvider>();
+Future<void> _openCheckout(
+  BuildContext screenContext,
+  List<Branch> branches, {
+  required VoidCallback onOrderSubmitted,
+  String initialType = 'Delivery',
+}) async {
+  final cart = screenContext.read<CartProvider>();
   if (firebaseService.currentUser?.isAnonymous == true) {
     await firebaseService.signOut();
-    if (context.mounted) {
+    if (screenContext.mounted) {
       showMessage(
-        context,
+        screenContext,
         'Ingresa o crea una cuenta para confirmar tu pedido.',
       );
     }
@@ -1040,208 +1723,304 @@ Future<void> _openCheckout(BuildContext context, List<Branch> branches) async {
   final form = GlobalKey<FormState>();
   final address = TextEditingController();
   final notes = TextEditingController();
-  var type = 'Delivery';
+  var type = initialType;
   var payment = 'Efectivo';
   var selectedBranchId =
       branches.any((branch) => branch.id == cart.selectedBranchId)
       ? cart.selectedBranchId!
       : branches.first.id;
   var busy = false;
-  await showDialog<void>(
-    context: context,
-    barrierDismissible: false,
-    builder: (dialogContext) => StatefulBuilder(
-      builder: (context, refresh) {
-        final branch = branches.firstWhere(
-          (item) => item.id == selectedBranchId,
-        );
-        final fee = cart.subtotal >= 50 ? 0.0 : 3.0;
-        return AlertDialog(
-          title: const Text('Confirma tu pedido'),
-          content: Form(
-            key: form,
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  DropdownButtonFormField<String>(
-                    initialValue: selectedBranchId,
-                    decoration: const InputDecoration(labelText: 'Sucursal'),
-                    items: branches
-                        .map(
-                          (item) => DropdownMenuItem(
-                            value: item.id,
-                            child: Text(
-                              item.name,
-                              overflow: TextOverflow.ellipsis,
+  bool? submitted;
+  try {
+    submitted = await showDialog<bool>(
+      context: screenContext,
+      barrierDismissible: false,
+      builder: (dialogRouteContext) => StatefulBuilder(
+        builder: (_, refresh) {
+          final branch = branches.firstWhere(
+            (item) => item.id == selectedBranchId,
+          );
+          final fee = type != 'Delivery' || cart.subtotal >= 50 ? 0.0 : 3.0;
+          return AlertDialog(
+            title: const Text('Confirma tu pedido'),
+            content: Form(
+              key: form,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    DropdownButtonFormField<String>(
+                      isExpanded: true,
+                      initialValue: selectedBranchId,
+                      decoration: const InputDecoration(labelText: 'Sucursal'),
+                      items: branches
+                          .map(
+                            (item) => DropdownMenuItem(
+                              value: item.id,
+                              child: Text(
+                                item.name,
+                                overflow: TextOverflow.ellipsis,
+                              ),
                             ),
-                          ),
-                        )
-                        .toList(),
-                    onChanged: (value) => refresh(
-                      () => selectedBranchId = value ?? selectedBranchId,
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  DropdownButtonFormField<String>(
-                    initialValue: type,
-                    decoration: const InputDecoration(
-                      labelText: 'Tipo de pedido',
-                    ),
-                    items: const [
-                      DropdownMenuItem(
-                        value: 'Delivery',
-                        child: Text('Delivery'),
+                          )
+                          .toList(),
+                      onChanged: (value) => refresh(
+                        () => selectedBranchId = value ?? selectedBranchId,
                       ),
-                      DropdownMenuItem(
-                        value: 'Recojo en tienda',
-                        child: Text('Recojo en tienda'),
+                    ),
+                    const SizedBox(height: 10),
+                    DropdownButtonFormField<String>(
+                      isExpanded: true,
+                      initialValue: type,
+                      decoration: const InputDecoration(
+                        labelText: 'Tipo de pedido',
                       ),
+                      items: const [
+                        DropdownMenuItem(
+                          value: 'Delivery',
+                          child: Text('Delivery'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'Recojo en tienda',
+                          child: Text('Recojo en tienda'),
+                        ),
+                      ],
+                      onChanged: (value) => refresh(() => type = value ?? type),
+                    ),
+                    if (type == 'Delivery') ...[
+                      const SizedBox(height: 10),
+                      TextFormField(
+                        controller: address,
+                        decoration: const InputDecoration(
+                          labelText: 'Dirección de entrega',
+                        ),
+                        validator: (value) =>
+                            type == 'Delivery' &&
+                                (value == null || value.trim().length < 6)
+                            ? 'Indica una dirección completa.'
+                            : null,
+                      ),
+                      if (!branch.acceptsDelivery)
+                        const Text(
+                          'Esta sucursal no acepta delivery.',
+                          style: TextStyle(color: AppTheme.red),
+                        ),
                     ],
-                    onChanged: (value) => refresh(() => type = value ?? type),
-                  ),
-                  if (type == 'Delivery') ...[
+                    const SizedBox(height: 10),
+                    DropdownButtonFormField<String>(
+                      isExpanded: true,
+                      initialValue: payment,
+                      decoration: const InputDecoration(
+                        labelText: 'Método de pago',
+                      ),
+                      items: const [
+                        DropdownMenuItem(
+                          value: 'Efectivo',
+                          child: Text('Efectivo'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'Yape/Plin',
+                          child: Text('Yape / Plin'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'Tarjeta Visa',
+                          child: Text('Tarjeta Visa (al recibir)'),
+                        ),
+                      ],
+                      onChanged: (value) =>
+                          refresh(() => payment = value ?? payment),
+                    ),
                     const SizedBox(height: 10),
                     TextFormField(
-                      controller: address,
+                      controller: notes,
                       decoration: const InputDecoration(
-                        labelText: 'Dirección de entrega',
+                        labelText: 'Notas del pedido (opcional)',
                       ),
-                      validator: (value) =>
-                          type == 'Delivery' &&
-                              (value == null || value.trim().length < 6)
-                          ? 'Indica una dirección completa.'
-                          : null,
                     ),
-                    if (!branch.acceptsDelivery)
-                      const Text(
-                        'Esta sucursal no acepta delivery.',
-                        style: TextStyle(color: AppTheme.red),
-                      ),
+                    const SizedBox(height: 10),
+                    Text(
+                      'Envío: ${money(fee)}${fee == 0 ? ' (gratis desde S/ 50.00)' : ''}\n'
+                      'Total: ${money(cart.subtotal + fee)}',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                    ),
                   ],
-                  const SizedBox(height: 10),
-                  DropdownButtonFormField<String>(
-                    initialValue: payment,
-                    decoration: const InputDecoration(
-                      labelText: 'Método de pago',
-                    ),
-                    items: const [
-                      DropdownMenuItem(
-                        value: 'Efectivo',
-                        child: Text('Efectivo'),
-                      ),
-                      DropdownMenuItem(
-                        value: 'Yape/Plin',
-                        child: Text('Yape / Plin'),
-                      ),
-                      DropdownMenuItem(
-                        value: 'Tarjeta Visa',
-                        child: Text('Tarjeta Visa (al recibir)'),
-                      ),
-                    ],
-                    onChanged: (value) =>
-                        refresh(() => payment = value ?? payment),
-                  ),
-                  const SizedBox(height: 10),
-                  TextFormField(
-                    controller: notes,
-                    decoration: const InputDecoration(
-                      labelText: 'Notas del pedido (opcional)',
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  Text(
-                    'Envío: ${money(fee)}${fee == 0 ? ' (gratis desde S/ 50.00)' : ''}\n'
-                    'Total: ${money(cart.subtotal + fee)}',
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                ],
+                ),
               ),
             ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: busy ? null : () => Navigator.pop(dialogContext),
-              child: const Text('Volver'),
-            ),
-            FilledButton(
-              onPressed: busy
-                  ? null
-                  : () async {
-                      if (!form.currentState!.validate()) return;
-                      if (!branch.isOpen) {
-                        showMessage(
-                          context,
-                          'La sucursal está cerrada. Solo aceptamos pedidos durante su horario.',
-                          error: true,
-                        );
-                        return;
-                      }
-                      if (type == 'Delivery' && !branch.acceptsDelivery) {
-                        showMessage(
-                          context,
-                          'Esta sucursal no acepta delivery.',
-                          error: true,
-                        );
-                        return;
-                      }
-                      refresh(() => busy = true);
-                      try {
-                        await firebaseService.submitOrder(
-                          items: cart.items,
-                          branch: branch,
-                          deliveryType: type,
-                          address: type == 'Delivery'
-                              ? address.text.trim()
-                              : '',
-                          payment: payment,
-                          notes: notes.text.trim(),
-                          deliveryFee: fee,
-                        );
-                        cart.clear();
-                        if (dialogContext.mounted) Navigator.pop(dialogContext);
-                        if (context.mounted) {
+            actions: [
+              TextButton(
+                onPressed: busy
+                    ? null
+                    : () => Navigator.of(dialogRouteContext).pop(),
+                child: const Text('Volver'),
+              ),
+              FilledButton(
+                onPressed: busy
+                    ? null
+                    : () async {
+                        if (!form.currentState!.validate()) return;
+                        if (!branch.isOpen) {
                           showMessage(
-                            context,
-                            '¡Pedido registrado! Lo verás en Mis pedidos.',
-                          );
-                        }
-                      } catch (error) {
-                        refresh(() => busy = false);
-                        if (context.mounted) {
-                          showMessage(
-                            context,
-                            'No se pudo guardar el pedido: $error',
+                            screenContext,
+                            'La sucursal está cerrada. Solo aceptamos pedidos durante su horario.',
                             error: true,
                           );
+                          return;
                         }
-                      }
-                    },
-              child: busy
-                  ? const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Text('Confirmar pedido'),
-            ),
-          ],
+                        if (type == 'Delivery' && !branch.acceptsDelivery) {
+                          showMessage(
+                            screenContext,
+                            'Esta sucursal no acepta delivery.',
+                            error: true,
+                          );
+                          return;
+                        }
+                        refresh(() => busy = true);
+                        try {
+                          double? deliveryLatitude;
+                          double? deliveryLongitude;
+                          if (type == 'Delivery') {
+                            var permission = await Geolocator.checkPermission();
+                            if (permission == LocationPermission.denied) {
+                              permission = await Geolocator.requestPermission();
+                            }
+                            if (permission == LocationPermission.denied ||
+                                permission == LocationPermission.deniedForever) {
+                              throw Exception('Activa el permiso de ubicación para compartir tu dirección de entrega.');
+                            }
+                            final position = await Geolocator.getCurrentPosition();
+                            deliveryLatitude = position.latitude;
+                            deliveryLongitude = position.longitude;
+                          }
+                          await firebaseService.submitOrder(
+                            items: cart.items,
+                            branch: branch,
+                            deliveryType: type,
+                            address: type == 'Delivery'
+                                ? address.text.trim()
+                                : '',
+                            payment: payment,
+                            notes: notes.text.trim(),
+                            deliveryFee: fee,
+                            deliveryLatitude: deliveryLatitude,
+                            deliveryLongitude: deliveryLongitude,
+                          );
+                          if (dialogRouteContext.mounted) {
+                            Navigator.of(dialogRouteContext).pop(true);
+                          }
+                        } catch (error) {
+                          if (dialogRouteContext.mounted) {
+                            refresh(() => busy = false);
+                          }
+                          if (screenContext.mounted) {
+                            showMessage(
+                              screenContext,
+                              'No se pudo guardar el pedido: $error',
+                              error: true,
+                            );
+                          }
+                        }
+                      },
+                child: busy
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Text('Confirmar pedido'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  } finally {
+    address.dispose();
+    notes.dispose();
+  }
+  if (submitted == true && screenContext.mounted) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!screenContext.mounted) return;
+      cart.clear();
+      onOrderSubmitted();
+      showMessage(screenContext, '¡Pedido registrado! Lo verás en Rastreo.');
+    });
+  }
+}
+
+class CourierRouteOptimizer extends StatelessWidget {
+  const CourierRouteOptimizer({super.key, required this.orders});
+  final List<OrderRecord> orders;
+
+  @override
+  Widget build(BuildContext context) {
+    final destinations = orders
+        .where((order) =>
+            order.status == 'En camino' &&
+            order.deliveryLatitude != null &&
+            order.deliveryLongitude != null)
+        .toList();
+    if (destinations.length < 2) return const SizedBox.shrink();
+
+    final remaining = [...destinations];
+    final route = <OrderRecord>[];
+    while (remaining.isNotEmpty) {
+      final current = route.isEmpty
+          ? remaining.first
+          : route.last;
+      remaining.sort((a, b) {
+        final distanceA = Geolocator.distanceBetween(
+          current.deliveryLatitude!, current.deliveryLongitude!,
+          a.deliveryLatitude!, a.deliveryLongitude!,
         );
-      },
-    ),
-  );
-  address.dispose();
-  notes.dispose();
+        final distanceB = Geolocator.distanceBetween(
+          current.deliveryLatitude!, current.deliveryLongitude!,
+          b.deliveryLatitude!, b.deliveryLongitude!,
+        );
+        return distanceA.compareTo(distanceB);
+      });
+      route.add(remaining.removeAt(0));
+    }
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      color: const Color(0xFFFFF3E0),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Ruta optimizada', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 16)),
+            const SizedBox(height: 4),
+            const Text('Entrega primero las paradas cercanas para reducir distancia y tiempo.'),
+            const SizedBox(height: 8),
+            ...route.asMap().entries.map((entry) => ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  leading: CircleAvatar(child: Text('${entry.key + 1}')),
+                  title: Text('Pedido ${entry.value.number}', maxLines: 1, overflow: TextOverflow.ellipsis),
+                  subtitle: Text(entry.value.address),
+                )),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class OrdersScreen extends StatelessWidget {
-  const OrdersScreen({super.key, required this.isAdmin});
+  const OrdersScreen({
+    super.key,
+    required this.isAdmin,
+    this.isCourier = false,
+  });
   final bool isAdmin;
+  final bool isCourier;
 
   @override
   Widget build(BuildContext context) => StreamBuilder<List<OrderRecord>>(
-    stream: firebaseService.orders(admin: isAdmin),
+    stream: firebaseService.orders(admin: isAdmin || isCourier),
     builder: (context, snapshot) {
       if (snapshot.hasError) {
         return Center(
@@ -1251,24 +2030,440 @@ class OrdersScreen extends StatelessWidget {
       if (!snapshot.hasData) {
         return const Center(child: CircularProgressIndicator());
       }
-      final orders = snapshot.data!;
+      final courierId = firebaseService.currentUser?.uid ?? '';
+      final orders = snapshot.data!.where((order) {
+        if (!isCourier) return true;
+        final declined = order.declinedCouriers.contains(courierId);
+        return !declined && (order.courierId.isEmpty || order.courierId == courierId);
+      }).toList();
       if (orders.isEmpty) {
-        return const Center(child: Text('Todavía no tienes pedidos.'));
+        return _EmptyState(
+          icon: Icons.local_shipping_outlined,
+          title: isAdmin ? 'No hay pedidos todavía' : 'Aún no tienes pedidos',
+          message: isAdmin
+              ? 'Los pedidos nuevos aparecerán en esta sección.'
+              : 'Cuando realices un pedido, podrás seguir aquí su estado.',
+        );
       }
-      return ListView.builder(
-        padding: const EdgeInsets.all(12),
-        itemCount: orders.length,
-        itemBuilder: (context, index) =>
-            OrderTile(order: orders[index], isAdmin: isAdmin),
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Row(
+              children: [
+                Container(
+                  width: 44,
+                  height: 44,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFBE7E2),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: const Icon(
+                    Icons.receipt_long_outlined,
+                    color: AppTheme.red,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        isAdmin ? 'Pedidos del local' : 'Tus pedidos',
+                        style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      Text(
+                        isAdmin
+                            ? 'Revisa y actualiza cada pedido.'
+                            : 'Consulta el estado de tus pedidos en tiempo real.',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (isCourier) CourierRouteOptimizer(orders: orders),
+          ...orders.map((order) => OrderTile(order: order, isAdmin: isAdmin, isCourier: isCourier)),
+        ],
       );
     },
   );
 }
 
+class _OrderProgress extends StatelessWidget {
+  const _OrderProgress({required this.order});
+
+  final OrderRecord order;
+
+  @override
+  Widget build(BuildContext context) {
+    if (order.status == 'Cancelado') {
+      return Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: const Color(0xFFFFDAD6),
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: const Text(
+          'Este pedido fue cancelado.',
+          style: TextStyle(fontWeight: FontWeight.w700),
+        ),
+      );
+    }
+    final delivery = order.deliveryType == 'Delivery';
+    final steps = [
+      'Pendiente',
+      'Confirmado',
+      'En preparación',
+      delivery ? 'En camino' : 'Listo para recoger',
+      'Entregado',
+    ];
+    final current = steps.indexOf(order.status);
+    final activeStep = current < 0 ? 0 : current;
+    final description = switch (order.status) {
+      'Pendiente' => 'Esperando confirmación del local.',
+      'Confirmado' => 'El local confirmó tu pedido.',
+      'En preparación' => 'Estamos preparando tu pedido.',
+      'En camino' => 'Tu pedido salió del local.',
+      'Listo para recoger' => 'Tu pedido ya está listo en la sucursal.',
+      'Entregado' => '¡Que lo disfrutes!',
+      _ => 'El local actualizará el estado de tu pedido.',
+    };
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFEF1ED),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.outdoor_grill, color: AppTheme.red),
+              const SizedBox(width: 8),
+              const Expanded(
+                child: Text(
+                  'El viaje de tu pedido',
+                  style: TextStyle(fontWeight: FontWeight.w800),
+                ),
+              ),
+              const Icon(Icons.circle, size: 8, color: Colors.green),
+              const SizedBox(width: 5),
+              Text(
+                'En vivo',
+                style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                  color: Colors.green.shade800,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(description),
+          const SizedBox(height: 12),
+          ...List.generate(steps.length, (index) {
+            final complete = index <= activeStep;
+            final currentStep = index == activeStep;
+            return Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SizedBox(
+                  width: 28,
+                  child: Column(
+                    children: [
+                      Icon(
+                        complete
+                            ? Icons.check_circle
+                            : Icons.radio_button_unchecked,
+                        size: 21,
+                        color: currentStep
+                            ? AppTheme.red
+                            : complete
+                            ? Colors.green
+                            : Colors.grey,
+                      ),
+                      if (index < steps.length - 1)
+                        Container(
+                          width: 2,
+                          height: 20,
+                          color: complete
+                              ? Colors.green.withValues(alpha: 0.4)
+                              : Colors.grey.shade300,
+                        ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      steps[index],
+                      style: TextStyle(
+                        fontWeight: currentStep
+                            ? FontWeight.w800
+                            : FontWeight.w500,
+                        color: currentStep ? AppTheme.red : null,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            );
+          }),
+          if (order.address.isNotEmpty) ...[
+            const Divider(),
+            Row(
+              children: [
+                const Icon(Icons.location_on_outlined, color: AppTheme.red),
+                const SizedBox(width: 8),
+                Expanded(child: Text(order.address)),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class CourierLiveLocationButton extends StatefulWidget {
+  const CourierLiveLocationButton({super.key, required this.orderId});
+  final String orderId;
+
+  @override
+  State<CourierLiveLocationButton> createState() =>
+      _CourierLiveLocationButtonState();
+}
+
+class _CourierLiveLocationButtonState
+    extends State<CourierLiveLocationButton> {
+  StreamSubscription<Position>? _positionSubscription;
+  bool _sharing = false;
+
+  Future<void> _toggleSharing() async {
+    if (_sharing) {
+      await _positionSubscription?.cancel();
+      _positionSubscription = null;
+      if (mounted) setState(() => _sharing = false);
+      return;
+    }
+
+    try {
+      final enabled = await Geolocator.isLocationServiceEnabled();
+      if (!enabled) throw Exception('Activa la ubicación del teléfono.');
+      var permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+      if (permission == LocationPermission.denied ||
+          permission == LocationPermission.deniedForever) {
+        throw Exception('Permiso de ubicación denegado.');
+      }
+
+      final settings = LocationSettings(
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 5,
+      );
+      _positionSubscription = Geolocator.getPositionStream(locationSettings: settings)
+          .listen((position) async {
+        await firebaseService.updateOrderLocation(
+          widget.orderId,
+          position.latitude,
+          position.longitude,
+        );
+      });
+      final current = await Geolocator.getCurrentPosition();
+      await firebaseService.updateOrderLocation(
+        widget.orderId,
+        current.latitude,
+        current.longitude,
+      );
+      if (mounted) setState(() => _sharing = true);
+    } catch (error) {
+      if (mounted) showMessage(context, 'No se pudo compartir: $error', error: true);
+    }
+  }
+
+  @override
+  void dispose() {
+    _positionSubscription?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => FilledButton.icon(
+        onPressed: _toggleSharing,
+        icon: Icon(_sharing ? Icons.stop_circle_outlined : Icons.share_location_outlined),
+        label: Text(_sharing ? 'Detener ubicación en vivo' : 'Compartir ubicación en vivo'),
+      );
+}
+
+class CourierDestinationMap extends StatelessWidget {
+  const CourierDestinationMap({super.key, required this.order});
+  final OrderRecord order;
+
+  @override
+  Widget build(BuildContext context) {
+    final destination = LatLng(order.deliveryLatitude!, order.deliveryLongitude!);
+    final courier = order.latitude != null && order.longitude != null
+        ? LatLng(order.latitude!, order.longitude!)
+        : null;
+    final points = courier == null ? [destination] : [courier, destination];
+    return SizedBox(
+      height: 210,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(14),
+        child: FlutterMap(
+          options: MapOptions(initialCenter: courier ?? destination, initialZoom: 15),
+          children: [
+            TileLayer(
+              urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+              userAgentPackageName: 'com.example.mr_apache_hyo',
+            ),
+            PolylineLayer(
+              polylines: [
+                Polyline(points: points, color: AppTheme.orange, strokeWidth: 4),
+              ],
+            ),
+            MarkerLayer(markers: [
+              if (courier != null)
+                Marker(
+                  point: courier,
+                  width: 42,
+                  height: 42,
+                  child: const Icon(Icons.delivery_dining, color: AppTheme.red, size: 38),
+                ),
+              Marker(
+                point: destination,
+                width: 42,
+                height: 42,
+                child: const Icon(Icons.location_on, color: Colors.blue, size: 38),
+              ),
+            ]),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class LiveDeliveryMap extends StatelessWidget {
+  const LiveDeliveryMap({super.key, required this.order});
+  final OrderRecord order;
+
+  @override
+  Widget build(BuildContext context) {
+    if (order.latitude == null || order.longitude == null) {
+      return OutlinedButton.icon(
+        onPressed: () async {
+          final uri = Uri.parse(
+            'https://www.google.com/maps/search/?api=1&query=${Uri.encodeComponent(order.address)}',
+          );
+          await launchUrl(uri, mode: LaunchMode.externalApplication);
+        },
+        icon: const Icon(Icons.location_searching),
+        label: const Text('Esperando ubicación del repartidor…'),
+      );
+    }
+
+    final courier = LatLng(order.latitude!, order.longitude!);
+    final customer = order.deliveryLatitude != null && order.deliveryLongitude != null
+        ? LatLng(order.deliveryLatitude!, order.deliveryLongitude!)
+        : null;
+    final distance = customer == null
+        ? null
+        : Geolocator.distanceBetween(
+            courier.latitude,
+            courier.longitude,
+            customer.latitude,
+            customer.longitude,
+          );
+    final etaMinutes = distance == null ? null : (distance / 500).ceil().clamp(1, 120);
+
+    return Card(
+      color: const Color(0xFFFFF7F4),
+      child: Padding(
+        padding: const EdgeInsets.all(10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(
+              height: 230,
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(14),
+                child: FlutterMap(
+                  options: MapOptions(
+                    initialCenter: courier,
+                    initialZoom: 15,
+                  ),
+                  children: [
+                    TileLayer(
+                      urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                      userAgentPackageName: 'com.example.mr_apache_hyo',
+                    ),
+                    if (customer != null)
+                      PolylineLayer(
+                        polylines: [
+                          Polyline(
+                            points: [courier, customer],
+                            color: AppTheme.red,
+                            strokeWidth: 4,
+                          ),
+                        ],
+                      ),
+                    MarkerLayer(markers: [
+                      Marker(
+                        point: courier,
+                        width: 42,
+                        height: 42,
+                        child: const Icon(Icons.delivery_dining, color: AppTheme.red, size: 38),
+                      ),
+                      if (customer != null)
+                        Marker(
+                          point: customer,
+                          width: 38,
+                          height: 38,
+                          child: const Icon(Icons.home, color: Colors.blue, size: 34),
+                        ),
+                    ]),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              etaMinutes == null
+                  ? 'Repartidor en movimiento'
+                  : 'Llegada estimada: $etaMinutes min',
+              style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 16),
+            ),
+            const Text('La ubicación se actualiza automáticamente.'),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class OrderTile extends StatelessWidget {
-  const OrderTile({super.key, required this.order, required this.isAdmin});
+  const OrderTile({
+    super.key,
+    required this.order,
+    required this.isAdmin,
+    this.isCourier = false,
+  });
   final OrderRecord order;
   final bool isAdmin;
+  final bool isCourier;
 
   static const _statuses = [
     'Pendiente',
@@ -1287,13 +2482,35 @@ class OrderTile extends StatelessWidget {
         : DateFormat('dd/MM/yyyy HH:mm').format(order.createdAt!);
     return Card(
       child: ExpansionTile(
+        initiallyExpanded:
+            order.status != 'Entregado' && order.status != 'Cancelado',
         title: Text(
           'Pedido ${order.number}',
-          style: const TextStyle(fontWeight: FontWeight.bold),
+          style: const TextStyle(fontWeight: FontWeight.w800),
         ),
-        subtitle: Text('${order.status} · ${money(order.total)} · $stamp'),
+        subtitle: Row(
+          children: [
+            Icon(
+              order.status == 'Cancelado'
+                  ? Icons.cancel_outlined
+                  : order.status == 'Entregado'
+                  ? Icons.check_circle_outline
+                  : Icons.local_shipping_outlined,
+              size: 16,
+              color: order.status == 'Cancelado'
+                  ? AppTheme.red
+                  : AppTheme.orange,
+            ),
+            const SizedBox(width: 5),
+            Expanded(
+              child: Text('${order.status} · ${money(order.total)} · $stamp'),
+            ),
+          ],
+        ),
         childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
         children: [
+          _OrderProgress(order: order),
+          const SizedBox(height: 14),
           Align(
             alignment: Alignment.centerLeft,
             child: Text('${order.branchName} · ${order.deliveryType}'),
@@ -1308,6 +2525,56 @@ class OrderTile extends StatelessWidget {
               alignment: Alignment.centerLeft,
               child: Text('Teléfono: ${order.customerPhone}'),
             ),
+          if (isCourier && order.courierId.isEmpty) ...[
+            const SizedBox(height: 6),
+            const Text('Pedido disponible', style: TextStyle(fontWeight: FontWeight.w800, color: Colors.green)),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: FilledButton.icon(
+                    onPressed: () async {
+                      try {
+                        await firebaseService.acceptOrder(order.id);
+                        if (context.mounted) showMessage(context, 'Pedido aceptado. Ya quedó asignado a ti.');
+                      } catch (error) {
+                        if (context.mounted) showMessage(context, '$error', error: true);
+                      }
+                    },
+                    icon: const Icon(Icons.check_circle_outline),
+                    label: const Text('Aceptar pedido'),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                IconButton.outlined(
+                  tooltip: 'No llevar este pedido',
+                  onPressed: () async {
+                    try {
+                      await firebaseService.declineOrder(order.id);
+                      if (context.mounted) showMessage(context, 'Pedido descartado.');
+                    } catch (error) {
+                      if (context.mounted) showMessage(context, '$error', error: true);
+                    }
+                  },
+                  icon: const Icon(Icons.close, color: AppTheme.red),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+          ],
+          if (isCourier && order.courierId.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              decoration: BoxDecoration(color: const Color(0xFFE8F5E9), borderRadius: BorderRadius.circular(8)),
+              child: const Text('Pedido asignado a ti', style: TextStyle(color: Colors.green, fontWeight: FontWeight.w800)),
+            ),
+            const SizedBox(height: 8),
+          ],
+          if (isCourier && order.deliveryLatitude != null && order.deliveryLongitude != null) ...[
+            CourierDestinationMap(order: order),
+            const SizedBox(height: 8),
+          ],
           if (order.address.isNotEmpty)
             Align(
               alignment: Alignment.centerLeft,
@@ -1324,6 +2591,10 @@ class OrderTile extends StatelessWidget {
             ),
           ),
           const Divider(),
+          if (order.status == 'En camino' && order.deliveryType == 'Delivery') ...[
+            LiveDeliveryMap(order: order),
+            const SizedBox(height: 8),
+          ],
           if (order.status != 'Cancelado')
             Wrap(
               spacing: 4,
@@ -1358,14 +2629,23 @@ class OrderTile extends StatelessWidget {
                   })
                   .toList(),
             ),
-          if (isAdmin)
+          if (isCourier && order.status == 'En camino')
+            CourierLiveLocationButton(orderId: order.id)
+          else if (isAdmin)
             DropdownButtonFormField<String>(
+              isExpanded: true,
               initialValue: order.status,
               decoration: const InputDecoration(labelText: 'Cambiar estado'),
               items: _statuses
                   .map(
-                    (status) =>
-                        DropdownMenuItem(value: status, child: Text(status)),
+                    (status) => DropdownMenuItem(
+                      value: status,
+                      child: Text(
+                        status,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
                   )
                   .toList(),
               onChanged: (status) async {
@@ -1597,36 +2877,39 @@ Future<void> _editProfile(
       title: const Text('Editar perfil'),
       content: Form(
         key: form,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextFormField(
-              controller: nombres,
-              textCapitalization: TextCapitalization.words,
-              decoration: const InputDecoration(labelText: 'Nombres'),
-              validator: (value) => _validateProfileName(value, 'tus nombres'),
-            ),
-            const SizedBox(height: 10),
-            TextFormField(
-              controller: apellidos,
-              textCapitalization: TextCapitalization.words,
-              decoration: const InputDecoration(labelText: 'Apellidos'),
-              validator: (value) =>
-                  _validateProfileName(value, 'tus apellidos'),
-            ),
-            const SizedBox(height: 10),
-            TextFormField(
-              controller: phone,
-              keyboardType: TextInputType.phone,
-              decoration: const InputDecoration(
-                labelText: 'Celular (9 dígitos)',
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextFormField(
+                controller: nombres,
+                textCapitalization: TextCapitalization.words,
+                decoration: const InputDecoration(labelText: 'Nombres'),
+                validator: (value) =>
+                    _validateProfileName(value, 'tus nombres'),
               ),
-              validator: (value) =>
-                  value == null || !RegExp(r'^\d{9}$').hasMatch(value)
-                  ? 'Ingresa un celular válido.'
-                  : null,
-            ),
-          ],
+              const SizedBox(height: 10),
+              TextFormField(
+                controller: apellidos,
+                textCapitalization: TextCapitalization.words,
+                decoration: const InputDecoration(labelText: 'Apellidos'),
+                validator: (value) =>
+                    _validateProfileName(value, 'tus apellidos'),
+              ),
+              const SizedBox(height: 10),
+              TextFormField(
+                controller: phone,
+                keyboardType: TextInputType.phone,
+                decoration: const InputDecoration(
+                  labelText: 'Celular (9 dígitos)',
+                ),
+                validator: (value) =>
+                    value == null || !RegExp(r'^\d{9}$').hasMatch(value)
+                    ? 'Ingresa un celular válido.'
+                    : null,
+              ),
+            ],
+          ),
         ),
       ),
       actions: [
@@ -1685,7 +2968,11 @@ class AddressesScreen extends StatelessWidget {
         }
         final addresses = snapshot.data!.docs;
         if (addresses.isEmpty) {
-          return const Center(child: Text('Aún no guardas direcciones.'));
+          return const _EmptyState(
+            icon: Icons.location_on_outlined,
+            title: 'Aún no guardas direcciones',
+            message: 'Agrega una dirección para agilizar tus pedidos.',
+          );
         }
         return ListView(
           padding: const EdgeInsets.all(12),
@@ -1764,35 +3051,37 @@ Future<void> _editAddress(
         title: Text(id == null ? 'Nueva dirección' : 'Editar dirección'),
         content: Form(
           key: form,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextFormField(
-                controller: name,
-                decoration: const InputDecoration(
-                  labelText: 'Nombre (Casa, trabajo...)',
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextFormField(
+                  controller: name,
+                  decoration: const InputDecoration(
+                    labelText: 'Nombre (Casa, trabajo...)',
+                  ),
+                  validator: (value) => value == null || value.trim().isEmpty
+                      ? 'Escribe un nombre.'
+                      : null,
                 ),
-                validator: (value) => value == null || value.trim().isEmpty
-                    ? 'Escribe un nombre.'
-                    : null,
-              ),
-              const SizedBox(height: 10),
-              TextFormField(
-                controller: address,
-                decoration: const InputDecoration(
-                  labelText: 'Dirección completa',
+                const SizedBox(height: 10),
+                TextFormField(
+                  controller: address,
+                  decoration: const InputDecoration(
+                    labelText: 'Dirección completa',
+                  ),
+                  validator: (value) => value == null || value.trim().length < 6
+                      ? 'Completa la dirección.'
+                      : null,
                 ),
-                validator: (value) => value == null || value.trim().length < 6
-                    ? 'Completa la dirección.'
-                    : null,
-              ),
-              CheckboxListTile(
-                contentPadding: EdgeInsets.zero,
-                value: primary,
-                title: const Text('Dirección principal'),
-                onChanged: (value) => refresh(() => primary = value ?? false),
-              ),
-            ],
+                CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  value: primary,
+                  title: const Text('Dirección principal'),
+                  onChanged: (value) => refresh(() => primary = value ?? false),
+                ),
+              ],
+            ),
           ),
         ),
         actions: [
@@ -1851,7 +3140,11 @@ class ReviewsScreen extends StatelessWidget {
         }
         final reviews = snapshot.data!.docs;
         if (reviews.isEmpty) {
-          return const Center(child: Text('Aún no tienes reseñas.'));
+          return const _EmptyState(
+            icon: Icons.star_outline,
+            title: 'Aún no tienes reseñas',
+            message: 'Comparte tu experiencia cuando quieras.',
+          );
         }
         return ListView(
           padding: const EdgeInsets.all(12),
@@ -1910,34 +3203,37 @@ Future<void> _editReview(
         title: Text(id == null ? 'Tu reseña' : 'Editar reseña'),
         content: Form(
           key: form,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              DropdownButtonFormField<int>(
-                initialValue: stars,
-                decoration: const InputDecoration(labelText: 'Calificación'),
-                items: [1, 2, 3, 4, 5]
-                    .map(
-                      (value) => DropdownMenuItem(
-                        value: value,
-                        child: Text(
-                          '$value ${value == 1 ? 'estrella' : 'estrellas'}',
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                DropdownButtonFormField<int>(
+                  isExpanded: true,
+                  initialValue: stars,
+                  decoration: const InputDecoration(labelText: 'Calificación'),
+                  items: [1, 2, 3, 4, 5]
+                      .map(
+                        (value) => DropdownMenuItem(
+                          value: value,
+                          child: Text(
+                            '$value ${value == 1 ? 'estrella' : 'estrellas'}',
+                          ),
                         ),
-                      ),
-                    )
-                    .toList(),
-                onChanged: (value) => refresh(() => stars = value ?? stars),
-              ),
-              const SizedBox(height: 10),
-              TextFormField(
-                controller: comment,
-                maxLines: 3,
-                decoration: const InputDecoration(labelText: 'Comentario'),
-                validator: (value) => value == null || value.trim().length < 3
-                    ? 'Escribe un comentario.'
-                    : null,
-              ),
-            ],
+                      )
+                      .toList(),
+                  onChanged: (value) => refresh(() => stars = value ?? stars),
+                ),
+                const SizedBox(height: 10),
+                TextFormField(
+                  controller: comment,
+                  maxLines: 3,
+                  decoration: const InputDecoration(labelText: 'Comentario'),
+                  validator: (value) => value == null || value.trim().length < 3
+                      ? 'Escribe un comentario.'
+                      : null,
+                ),
+              ],
+            ),
           ),
         ),
         actions: [
@@ -2004,7 +3300,11 @@ class ReservationsScreen extends StatelessWidget {
             return firstDate.compareTo(secondDate);
           });
         if (reservations.isEmpty) {
-          return const Center(child: Text('Aún no tienes reservas.'));
+          return const _EmptyState(
+            icon: Icons.event_outlined,
+            title: 'Aún no tienes reservas',
+            message: 'Reserva una mesa para tu próxima visita.',
+          );
         }
         return ListView(
           padding: const EdgeInsets.all(12),
@@ -2087,56 +3387,62 @@ Future<void> _editReservation(
     builder: (dialogContext) => StatefulBuilder(
       builder: (context, refresh) => AlertDialog(
         title: Text(id == null ? 'Nueva reserva' : 'Editar reserva'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: const Icon(Icons.calendar_month),
-              title: Text(DateFormat('dd/MM/yyyy').format(date)),
-              onTap: () async {
-                final chosen = await showDatePicker(
-                  context: context,
-                  initialDate: date.isBefore(DateTime.now())
-                      ? DateTime.now()
-                      : date,
-                  firstDate: DateTime.now(),
-                  lastDate: DateTime.now().add(const Duration(days: 180)),
-                );
-                if (chosen != null && context.mounted) {
-                  refresh(() => date = chosen);
-                }
-              },
-            ),
-            TextFormField(
-              initialValue: time,
-              decoration: const InputDecoration(labelText: 'Hora (ej. 19:00)'),
-              onChanged: (value) => time = value,
-            ),
-            const SizedBox(height: 10),
-            TextFormField(
-              initialValue: '$people',
-              keyboardType: TextInputType.number,
-              decoration: const InputDecoration(
-                labelText: 'Número de personas',
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.calendar_month),
+                title: Text(DateFormat('dd/MM/yyyy').format(date)),
+                onTap: () async {
+                  final chosen = await showDatePicker(
+                    context: context,
+                    initialDate: date.isBefore(DateTime.now())
+                        ? DateTime.now()
+                        : date,
+                    firstDate: DateTime.now(),
+                    lastDate: DateTime.now().add(const Duration(days: 180)),
+                  );
+                  if (chosen != null && context.mounted) {
+                    refresh(() => date = chosen);
+                  }
+                },
               ),
-              onChanged: (value) => people = int.tryParse(value) ?? 0,
-            ),
-            const SizedBox(height: 10),
-            DropdownButtonFormField<String>(
-              initialValue: branchId,
-              decoration: const InputDecoration(labelText: 'Sucursal'),
-              items: branches
-                  .map(
-                    (item) => DropdownMenuItem(
-                      value: item.id,
-                      child: Text(item.name, overflow: TextOverflow.ellipsis),
-                    ),
-                  )
-                  .toList(),
-              onChanged: (value) => refresh(() => branchId = value ?? branchId),
-            ),
-          ],
+              TextFormField(
+                initialValue: time,
+                decoration: const InputDecoration(
+                  labelText: 'Hora (ej. 19:00)',
+                ),
+                onChanged: (value) => time = value,
+              ),
+              const SizedBox(height: 10),
+              TextFormField(
+                initialValue: '$people',
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  labelText: 'Número de personas',
+                ),
+                onChanged: (value) => people = int.tryParse(value) ?? 0,
+              ),
+              const SizedBox(height: 10),
+              DropdownButtonFormField<String>(
+                isExpanded: true,
+                initialValue: branchId,
+                decoration: const InputDecoration(labelText: 'Sucursal'),
+                items: branches
+                    .map(
+                      (item) => DropdownMenuItem(
+                        value: item.id,
+                        child: Text(item.name, overflow: TextOverflow.ellipsis),
+                      ),
+                    )
+                    .toList(),
+                onChanged: (value) =>
+                    refresh(() => branchId = value ?? branchId),
+              ),
+            ],
+          ),
         ),
         actions: [
           TextButton(
@@ -2355,26 +3661,6 @@ class AdminScreen extends StatelessWidget {
           _AdminOrders(),
         ],
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: () async {
-          try {
-            await firebaseService.seedInitialData();
-            if (context.mounted) {
-              showMessage(context, 'Carta y sucursales iniciales cargadas.');
-            }
-          } catch (error) {
-            if (context.mounted) {
-              showMessage(
-                context,
-                'No se pudieron cargar los datos: $error',
-                error: true,
-              );
-            }
-          }
-        },
-        icon: const Icon(Icons.cloud_upload_outlined),
-        label: const Text('Cargar datos iniciales'),
-      ),
     ),
   );
 }
@@ -2390,7 +3676,7 @@ class _AdminProducts extends StatelessWidget {
       child: const Icon(Icons.add),
     ),
     body: StreamBuilder<List<Product>>(
-      stream: firebaseService.products(),
+      stream: firebaseService.firestoreProducts(),
       builder: (context, snapshot) {
         if (snapshot.hasError) {
           return Center(child: Text('Error: ${snapshot.error}'));
@@ -2399,8 +3685,10 @@ class _AdminProducts extends StatelessWidget {
           return const Center(child: CircularProgressIndicator());
         }
         if (snapshot.data!.isEmpty) {
-          return const Center(
-            child: Text('Aún no hay productos. Carga la carta inicial.'),
+          return const _EmptyState(
+            icon: Icons.local_pizza_outlined,
+            title: 'Aún no hay productos',
+            message: 'Pulsa + para agregar el primer producto.',
           );
         }
         return ListView(
@@ -2408,10 +3696,7 @@ class _AdminProducts extends StatelessWidget {
           children: snapshot.data!.map((product) {
             return Card(
               child: ListTile(
-                leading: Icon(
-                  product.available ? Icons.check_circle : Icons.pause_circle,
-                  color: product.available ? Colors.green : Colors.grey,
-                ),
+                leading: ProductImage(url: productImageUrl(product), size: 52),
                 title: Text(product.name),
                 subtitle: Text(
                   '${product.category} · Desde ${money(product.startingPrice)}',
@@ -2512,6 +3797,14 @@ class _ProductFormState extends State<_ProductForm> {
   late String _category = widget.product?.category ?? 'Combos';
   bool _available = true;
 
+  String get _previewImageUrl {
+    if (_image.text.trim().isNotEmpty) {
+      return displayImageUrl(_image.text);
+    }
+    final product = widget.product;
+    return product == null ? '' : productImageUrl(product);
+  }
+
   @override
   void initState() {
     super.initState();
@@ -2549,7 +3842,41 @@ class _ProductFormState extends State<_ProductForm> {
                     : null,
               ),
               const SizedBox(height: 8),
+              TextFormField(
+                controller: _image,
+                keyboardType: TextInputType.url,
+                decoration: const InputDecoration(
+                  labelText: 'Imagen del plato · enlace de Google Drive',
+                  hintText: 'https://drive.google.com/file/d/...',
+                  helperText:
+                      'Drive: Compartir → Acceso general → Cualquier persona con el enlace → Lector.',
+                  prefixIcon: Icon(Icons.link),
+                  alignLabelWithHint: true,
+                ),
+                validator: (value) => validateImageUrl(value ?? ''),
+                onChanged: (_) => setState(() {}),
+              ),
+              const SizedBox(height: 8),
+              Card(
+                color: const Color(0xFFFEF1ED),
+                child: Padding(
+                  padding: const EdgeInsets.all(10),
+                  child: Row(
+                    children: [
+                      ProductImage(url: _previewImageUrl, size: 76),
+                      const SizedBox(width: 12),
+                      const Expanded(
+                        child: Text(
+                          'Vista previa de la foto. El enlace se guarda en Firestore en products/{id}.image.',
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
               DropdownButtonFormField<String>(
+                isExpanded: true,
                 initialValue: _category,
                 decoration: const InputDecoration(labelText: 'Categoría'),
                 items:
@@ -2579,13 +3906,6 @@ class _ProductFormState extends State<_ProductForm> {
                 validator: (value) => value == null || value.trim().isEmpty
                     ? 'Campo obligatorio.'
                     : null,
-              ),
-              const SizedBox(height: 8),
-              TextFormField(
-                controller: _image,
-                decoration: const InputDecoration(
-                  labelText: 'URL de imagen (opcional)',
-                ),
               ),
               const SizedBox(height: 8),
               if (_category == 'Pizzas') ...[
@@ -2642,7 +3962,7 @@ class _ProductFormState extends State<_ProductForm> {
             'name': _name.text.trim(),
             'category': _category,
             'description': _description.text.trim(),
-            'image': _image.text.trim(),
+            'image': displayImageUrl(_image.text),
             'available': _available,
             'prices': prices,
             'updatedAt': FieldValue.serverTimestamp(),
@@ -2685,9 +4005,17 @@ class _AdminBranches extends StatelessWidget {
         if (!snapshot.hasData) {
           return const Center(child: CircularProgressIndicator());
         }
+        final branches = snapshot.data!;
+        if (branches.isEmpty) {
+          return const _EmptyState(
+            icon: Icons.store_outlined,
+            title: 'Aún no hay sucursales',
+            message: 'Pulsa + para agregar una sucursal.',
+          );
+        }
         return ListView(
           padding: const EdgeInsets.fromLTRB(12, 12, 12, 88),
-          children: snapshot.data!.map((branch) {
+          children: branches.map((branch) {
             return Card(
               child: ListTile(
                 leading: const Icon(Icons.storefront, color: AppTheme.red),
@@ -2849,7 +4177,11 @@ class _AdminPromotions extends StatelessWidget {
         }
         final promotions = snapshot.data!.docs;
         if (promotions.isEmpty) {
-          return const Center(child: Text('No hay promociones todavía.'));
+          return const _EmptyState(
+            icon: Icons.local_offer_outlined,
+            title: 'No hay promociones todavía',
+            message: 'Pulsa + para agregar una promoción.',
+          );
         }
         return ListView(
           padding: const EdgeInsets.fromLTRB(12, 12, 12, 88),
@@ -2910,29 +4242,31 @@ Future<void> _editPromotion(
       title: Text(id == null ? 'Nueva promoción / combo' : 'Editar promoción'),
       content: Form(
         key: form,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            _requiredField(name, 'Nombre'),
-            _requiredField(description, 'Descripción'),
-            TextFormField(
-              controller: price,
-              keyboardType: const TextInputType.numberWithOptions(
-                decimal: true,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _requiredField(name, 'Nombre'),
+              _requiredField(description, 'Descripción'),
+              TextFormField(
+                controller: price,
+                keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true,
+                ),
+                decoration: const InputDecoration(labelText: 'Precio (S/)'),
+                validator: (value) => (double.tryParse(value ?? '') ?? 0) <= 0
+                    ? 'Ingresa un precio mayor a cero.'
+                    : null,
               ),
-              decoration: const InputDecoration(labelText: 'Precio (S/)'),
-              validator: (value) => (double.tryParse(value ?? '') ?? 0) <= 0
-                  ? 'Ingresa un precio mayor a cero.'
-                  : null,
-            ),
-            const SizedBox(height: 8),
-            TextFormField(
-              controller: image,
-              decoration: const InputDecoration(
-                labelText: 'URL de imagen (opcional)',
+              const SizedBox(height: 8),
+              TextFormField(
+                controller: image,
+                decoration: const InputDecoration(
+                  labelText: 'URL de imagen (opcional)',
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
       actions: [
@@ -3000,58 +4334,79 @@ class _AdminOrdersState extends State<_AdminOrders> {
           children: [
             Padding(
               padding: const EdgeInsets.all(10),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: DropdownButtonFormField<String>(
-                      initialValue: _status,
-                      decoration: const InputDecoration(labelText: 'Estado'),
-                      items:
-                          [
-                                'Todos',
-                                'Pendiente',
-                                'Confirmado',
-                                'En preparación',
-                                'En camino',
-                                'Listo para recoger',
-                                'Entregado',
-                                'Cancelado',
-                              ]
-                              .map(
-                                (item) => DropdownMenuItem(
-                                  value: item,
-                                  child: Text(item),
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final statusFilter = DropdownButtonFormField<String>(
+                    isExpanded: true,
+                    initialValue: _status,
+                    decoration: const InputDecoration(labelText: 'Estado'),
+                    items:
+                        [
+                              'Todos',
+                              'Pendiente',
+                              'Confirmado',
+                              'En preparación',
+                              'En camino',
+                              'Listo para recoger',
+                              'Entregado',
+                              'Cancelado',
+                            ]
+                            .map(
+                              (item) => DropdownMenuItem(
+                                value: item,
+                                child: Text(
+                                  item,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
                                 ),
-                              )
-                              .toList(),
-                      onChanged: (value) =>
-                          setState(() => _status = value ?? 'Todos'),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: DropdownButtonFormField<String>(
-                      initialValue: _branch,
-                      decoration: const InputDecoration(labelText: 'Sucursal'),
-                      items:
-                          [
-                                'Todas',
-                                ...?branchesSnapshot.data?.map(
-                                  (item) => item.name,
+                              ),
+                            )
+                            .toList(),
+                    onChanged: (value) =>
+                        setState(() => _status = value ?? 'Todos'),
+                  );
+                  final branchFilter = DropdownButtonFormField<String>(
+                    isExpanded: true,
+                    initialValue: _branch,
+                    decoration: const InputDecoration(labelText: 'Sucursal'),
+                    items:
+                        [
+                              'Todas',
+                              ...?branchesSnapshot.data?.map(
+                                (item) => item.name,
+                              ),
+                            ]
+                            .map(
+                              (item) => DropdownMenuItem(
+                                value: item,
+                                child: Text(
+                                  item,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
                                 ),
-                              ]
-                              .map(
-                                (item) => DropdownMenuItem(
-                                  value: item,
-                                  child: Text(item),
-                                ),
-                              )
-                              .toList(),
-                      onChanged: (value) =>
-                          setState(() => _branch = value ?? 'Todas'),
-                    ),
-                  ),
-                ],
+                              ),
+                            )
+                            .toList(),
+                    onChanged: (value) =>
+                        setState(() => _branch = value ?? 'Todas'),
+                  );
+                  if (constraints.maxWidth < 420) {
+                    return Column(
+                      children: [
+                        statusFilter,
+                        const SizedBox(height: 8),
+                        branchFilter,
+                      ],
+                    );
+                  }
+                  return Row(
+                    children: [
+                      Expanded(child: statusFilter),
+                      const SizedBox(width: 8),
+                      Expanded(child: branchFilter),
+                    ],
+                  );
+                },
               ),
             ),
             Expanded(

@@ -194,6 +194,13 @@ class OrderRecord {
     required this.address,
     this.customerName = '',
     this.customerPhone = '',
+    this.latitude,
+    this.longitude,
+    this.deliveryLatitude,
+    this.deliveryLongitude,
+    this.courierId = '',
+    this.courierName = '',
+    this.declinedCouriers = const [],
   });
 
   final String id;
@@ -207,9 +214,17 @@ class OrderRecord {
   final String address;
   final String customerName;
   final String customerPhone;
+  final double? latitude;
+  final double? longitude;
+  final double? deliveryLatitude;
+  final double? deliveryLongitude;
+  final String courierId;
+  final String courierName;
+  final List<String> declinedCouriers;
 
   factory OrderRecord.fromDoc(DocumentSnapshot<Map<String, dynamic>> doc) {
     final data = doc.data()!;
+    final tracking = Map<String, dynamic>.from(data['tracking'] as Map? ?? {});
     return OrderRecord(
       id: doc.id,
       number: data['number'] as String? ?? doc.id,
@@ -226,6 +241,13 @@ class OrderRecord {
       customerPhone: data['customerPhone'] as String? ??
           data['phone'] as String? ??
           '',
+      latitude: (tracking['latitude'] as num?)?.toDouble(),
+      longitude: (tracking['longitude'] as num?)?.toDouble(),
+      deliveryLatitude: (data['deliveryLatitude'] as num?)?.toDouble(),
+      deliveryLongitude: (data['deliveryLongitude'] as num?)?.toDouble(),
+      courierId: data['courierId'] as String? ?? '',
+      courierName: data['courierName'] as String? ?? '',
+      declinedCouriers: List<String>.from(data['declinedCouriers'] as List? ?? const []),
     );
   }
 }
