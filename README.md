@@ -1,6 +1,6 @@
 # Mr. Apache Pizzería
 
-Aplicación Flutter para explorar la carta y gestionar pedidos de los locales Mr. Apache de Huancayo. La app utiliza Firebase Authentication y Cloud Firestore. Los pedidos quedan en estado **Pendiente** hasta que un administrador los confirme.
+Aplicación Flutter para explorar la carta y gestionar pedidos de los locales Mr. Apache de Huancayo. La app utiliza Firebase Authentication, Cloud Firestore y Firebase Storage. Los pedidos quedan en estado **Pendiente** hasta que un administrador los confirme.
 
 ## 1. Crear y preparar el proyecto
 
@@ -17,7 +17,7 @@ Las dependencias se declaran en `pubspec.yaml`. Para instalarlas o actualizar el
 flutter pub get
 ```
 
-Paquetes usados: `firebase_core`, `firebase_auth`, `cloud_firestore`, `provider`, `intl`, `url_launcher`, `google_fonts`, `cached_network_image` y `flutter_launcher_icons`.
+Paquetes usados: `firebase_core`, `firebase_auth`, `cloud_firestore`, `firebase_storage`, `image_picker`, `provider`, `intl`, `url_launcher`, `google_fonts`, `cached_network_image` y `flutter_launcher_icons`.
 
 El identificador Android actual es `com.company.MrApacheHyo` (`android/app/build.gradle.kts`) y debe coincidir exactamente con el cliente Android de Firebase.
 
@@ -28,7 +28,8 @@ El identificador Android actual es `com.company.MrApacheHyo` (`android/app/build
 3. Descarga `google-services.json` y guárdalo en `android/app/google-services.json`. El archivo recibido se conserva también en `android/google-services.json`.
 4. En **Authentication → Sign-in method**, habilita **Correo electrónico/Contraseña** y **Anónimo**. El acceso anónimo permite navegar por inicio y carta sin registrarse; confirmar un pedido requiere una cuenta registrada.
 5. En **Firestore Database**, crea una base de datos. Publica las reglas de [`firestore.rules`](./firestore.rules) desde la pestaña **Reglas**.
-6. Desde la raíz ejecuta:
+6. En **Storage**, habilita un bucket para el proyecto y publica las reglas de [`storage.rules`](./storage.rules). La configuración Android incluye el bucket del proyecto asociado.
+7. Desde la raíz ejecuta:
 
    ```powershell
    flutter pub get
@@ -73,6 +74,7 @@ Las reglas de Firestore completas están en [`firestore.rules`](./firestore.rule
 - Las cuentas solo pueden leer y editar su perfil sin cambiar el campo `role`.
 - Los clientes solo pueden leer y editar sus direcciones y reseñas, y sus reservas.
 - Los pedidos son legibles por su propietario y por administradores. El cliente solo puede crearlos como `Pendiente` y cancelar los pendientes; cambiar otros estados queda reservado al administrador.
+- Las fotos de referencia se guardan en Firebase Storage con un límite de 5 MB. Solo el cliente dueño, el administrador y el repartidor asignado pueden leerlas; la regla de Storage también permite limpiar una foto temporal si el pedido no llegó a crearse.
 - El catálogo (productos, categorías, sucursales y promociones) es legible para usuarios autenticados y solo el administrador puede escribir.
 - Los pedidos y los datos del catálogo requieren que Firebase Authentication esté habilitado.
 
@@ -105,7 +107,7 @@ Esquema recomendado (los tiempos se guardan como `Timestamp` de Firestore):
 | `categories/{categoryId}` | `name: string` |
 | `products/{productId}` | `name: string`, `category: string`, `description: string`, `prices: map<string, number>`, `image: string`, `available: boolean` |
 | `promotions/{promotionId}` | `name: string`, `description: string`, `price: number`, `image: string` |
-| `orders/{orderId}` | `number: string`, `userId: string`, `customerName: string`, `customerFirstName: string`, `customerLastName: string`, `customerPhone: string`, `items: array<map>`, `subtotal: number`, `deliveryFee: number`, `total: number`, `branchId: string`, `branchName: string`, `deliveryType: string`, `address: string`, `payment: string`, `notes: string`, `status: string`, `createdAt: timestamp`, `business: map` |
+| `orders/{orderId}` | `number: string`, `userId: string`, `customerName: string`, `customerFirstName: string`, `customerLastName: string`, `customerPhone: string`, `items: array<map>`, `subtotal: number`, `deliveryFee: number`, `total: number`, `branchId: string`, `branchName: string`, `deliveryType: string`, `address: string`, `referencePhotoPath: string` (opcional), `payment: string`, `notes: string`, `status: string`, `createdAt: timestamp`, `business: map` |
 | `reviews/{reviewId}` | `userId: string`, `customerName: string`, `stars: number`, `comment: string`, `createdAt: timestamp`, `updatedAt: timestamp` |
 | `reservations/{reservationId}` | `userId: string`, `date: timestamp`, `time: string`, `people: number`, `branchId: string`, `branchName: string`, `status: string` |
 
@@ -117,11 +119,13 @@ La app incluye carta editable con combos, pizzas, pastas, carnes, bebidas y extr
 2. Registra una cuenta con nombres y apellidos (letras/tildes/ñ/espacios, al menos 2 caracteres cada campo), celular peruano de 9 dígitos, correo y contraseña de al menos 6 caracteres con confirmación.
 3. Navega por Inicio y Carta; verifica el selector de sucursal, búsqueda, categoría, tamaño de pizza y notas.
 4. Agrega productos, modifica cantidades, elimínalos y vacía el carrito.
-5. Mientras el local esté abierto, confirma un pedido con delivery o recojo. Para delivery ingresa dirección. Revisa subtotal, envío (S/ 3.00; gratis desde S/ 50.00), pago y notas.
+5. Mientras el local esté abierto, confirma un pedido con delivery o recojo. Para delivery ingresa dirección y, si quieres, toma o adjunta una foto de referencia de la puerta. La imagen se muestra al cliente, al administrador y al repartidor asignado. Revisa subtotal, envío (S/ 3.00; gratis desde S/ 50.00), pago y notas. Firebase Storage debe estar habilitado y sus reglas publicadas.
 6. Revisa **Mis pedidos**, cancela uno pendiente y observa los estados con la actualización en tiempo real.
 7. En Perfil prueba editar nombre/teléfono, agregar/editar/marcar/eliminar direcciones, guardar/editar/eliminar reseñas y reservar/editar/cancelar/eliminar mesa.
 8. Asigna `role: "admin"` a una cuenta de prueba en Firestore. Verifica el panel, carga inicial, CRUD de productos y sucursales, promociones y cambio/filtrado de estado de pedidos.
 9. Prueba **Explorar sin cuenta** antes de registrarte; revisa Nosotros/Contacto (mapa, llamada, WhatsApp, web) y cierra sesión.
+10. Crea un pedido con **Recojo**. Desde el panel de administrador cambia su estado a **Listo para recoger**. El cliente verá un QR en el detalle del pedido; desde la barra superior del administrador, usa **Validar recojo con QR** para escanearlo. Un QR válido marca el pedido como **Entregado** y no se puede volver a usar. Concede el permiso de cámara cuando el sistema lo solicite; Android lo declara en el manifiesto y iOS en `ios/Runner/Info.plist`.
+11. En el inicio de sesión, activa **Usar huella o rostro al abrir la app**. Si Android aún no tiene una biometría registrada, se abre la pantalla de inscripción del sistema; al volver, la app comprueba el registro. En iOS, sigue las instrucciones para agregar Face ID o Touch ID desde Ajustes y vuelve a comprobarlo. La biometría protege una sesión Firebase que se mantiene iniciada al volver a abrir la app; también se admite el PIN o método de desbloqueo del dispositivo. Si cierras sesión, vuelve a ingresar con correo y contraseña. Delivery guarda la ubicación GPS al crear el pedido; el repartidor puede compartir su ubicación en tiempo real durante la entrega.
 
 Las pruebas unitarias de `test/cart_provider_test.dart` cubren el cálculo/edición del carrito, la validación y normalización de nombres y la lectura de perfiles antiguos. Ejecútalas junto al análisis con:
 
