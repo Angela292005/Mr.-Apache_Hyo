@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import 'core/theme/app_theme.dart';
+import 'firebase_options.dart';
 import 'providers/cart_provider.dart';
 import 'screens/store_screens.dart';
 import 'services/firebase_service.dart' as app_services;
@@ -31,12 +32,18 @@ class MrApacheApp extends StatefulWidget {
 }
 
 class _MrApacheAppState extends State<MrApacheApp> {
-  late final Future<FirebaseApp> _firebaseInitialization;
+  late final Future<void> _appInitialization;
 
   @override
   void initState() {
     super.initState();
-    _firebaseInitialization = Firebase.initializeApp();
+    _appInitialization = _initializeServices();
+  }
+
+  Future<void> _initializeServices() async {
+    await Firebase.initializeApp(
+      options: DefaultFirebaseOptions.currentPlatform,
+    );
   }
 
   @override
@@ -45,7 +52,7 @@ class _MrApacheAppState extends State<MrApacheApp> {
     debugShowCheckedModeBanner: false,
     theme: AppTheme.light,
     home: FutureBuilder(
-      future: _firebaseInitialization,
+      future: _appInitialization,
       builder: (context, snapshot) {
         if (snapshot.hasError) {
           return StartupErrorScreen(message: snapshot.error.toString());

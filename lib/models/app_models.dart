@@ -10,6 +10,7 @@ class UserModel {
     required this.correo,
     required this.role,
     this.fechaRegistro,
+    this.fotoPerfilBase64 = '',
   });
 
   final String id;
@@ -20,6 +21,7 @@ class UserModel {
   final String correo;
   final String role;
   final DateTime? fechaRegistro;
+  final String fotoPerfilBase64;
 
   factory UserModel.fromMap(Map<String, dynamic> data, {String id = ''}) {
     final first = (data['nombres'] as String? ?? '').trim();
@@ -58,6 +60,7 @@ class UserModel {
           .trim(),
       role: data['role'] as String? ?? 'cliente',
       fechaRegistro: timestamp?.toDate(),
+      fotoPerfilBase64: data['fotoPerfilBase64'] as String? ?? '',
     );
   }
 }
@@ -201,6 +204,7 @@ class OrderRecord {
     this.declinedCouriers = const [],
     this.pickupToken = '',
     this.referencePhotoPath = '',
+    this.referencePhotoBase64 = '',
   });
 
   final String id;
@@ -223,6 +227,7 @@ class OrderRecord {
   final List<String> declinedCouriers;
   final String pickupToken;
   final String referencePhotoPath;
+  final String referencePhotoBase64;
 
   factory OrderRecord.fromDoc(DocumentSnapshot<Map<String, dynamic>> doc) {
     final data = doc.data()!;
@@ -252,6 +257,7 @@ class OrderRecord {
       ),
       pickupToken: data['pickupToken'] as String? ?? '',
       referencePhotoPath: data['referencePhotoPath'] as String? ?? '',
+      referencePhotoBase64: data['referencePhotoBase64'] as String? ?? '',
     );
   }
 }

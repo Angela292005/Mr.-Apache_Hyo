@@ -1,25 +1,23 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:firebase_storage/firebase_storage.dart';
+import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
+
 import '../models/app_models.dart';
-import '../utils/product_image_url.dart';
 import '../utils/pickup_qr.dart';
+import '../utils/product_image_url.dart';
+import '../utils/reference_photo_codec.dart';
 
 class FirebaseService {
-  FirebaseService({
-    FirebaseAuth? auth,
-    FirebaseFirestore? firestore,
-    FirebaseStorage? storage,
-  }) : auth = auth ?? FirebaseAuth.instance,
-       firestore = firestore ?? FirebaseFirestore.instance,
-       storage = storage ?? FirebaseStorage.instance;
+  FirebaseService({FirebaseAuth? auth, FirebaseFirestore? firestore})
+    : auth = auth ?? FirebaseAuth.instance,
+      firestore = firestore ?? FirebaseFirestore.instance;
 
   final FirebaseAuth auth;
   final FirebaseFirestore firestore;
-  final FirebaseStorage storage;
 
   User? get currentUser => auth.currentUser;
 
@@ -109,6 +107,22 @@ class FirebaseService {
       'apellidos': normalizedSurnames,
       'nombreCompleto': fullName,
       'telefono': telefono.trim(),
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  Future<void> updateProfilePhoto(String photoBase64) async {
+    final user = currentUser!;
+    await firestore.collection('users').doc(user.uid).update({
+      'fotoPerfilBase64': photoBase64,
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  Future<void> removeProfilePhoto() async {
+    final user = currentUser!;
+    await firestore.collection('users').doc(user.uid).update({
+      'fotoPerfilBase64': FieldValue.delete(),
       'updatedAt': FieldValue.serverTimestamp(),
     });
   }
@@ -616,6 +630,11 @@ class FirebaseService {
         deliveryReferencePhoto.length > 5 * 1024 * 1024) {
       throw ArgumentError('La foto de referencia no puede superar 5 MB.');
     }
+    final referencePhotoBase64 = deliveryReferencePhoto == null
+        ? null
+        : base64Encode(
+            await compute(compressReferencePhoto, deliveryReferencePhoto),
+          );
     final user = currentUser!;
     final userSnapshot = await firestore
         .collection('users')
@@ -623,9 +642,6 @@ class FirebaseService {
         .get();
     final userData = UserModel.fromMap(userSnapshot.data() ?? {}, id: user.uid);
     final document = firestore.collection('orders').doc();
-    final referencePhotoPath = deliveryReferencePhoto == null
-        ? null
-        : 'order-references/${user.uid}/${document.id}/reference.jpg';
     final number = 'MA-${DateTime.now().millisecondsSinceEpoch % 1000000}';
     final pickupToken = deliveryType == 'Recojo'
         ? List.generate(
@@ -638,78 +654,53 @@ class FirebaseService {
       0,
       (total, item) => total + item.subtotal,
     );
-    if (deliveryReferencePhoto != null) {
-      try {
-        await storage
-            .ref(referencePhotoPath!)
-            .putData(
-              deliveryReferencePhoto,
-              SettableMetadata(contentType: 'image/jpeg'),
-            );
-      } catch (error) {
-        throw StateError('No se pudo subir la foto de referencia: $error');
-      }
-    }
-
-    try {
-      await document.set({
-        'number': number,
-        'userId': user.uid,
-        'customerName': userData.nombreCompleto.isEmpty
-            ? user.displayName ?? ''
-            : userData.nombreCompleto,
-        'customerFirstName': userData.nombres,
-        'customerLastName': userData.apellidos,
-        'customerPhone': userData.telefono,
-        'items': items
-            .map(
-              (item) => {
-                'productId': item.product.id,
-                'name': item.product.name,
-                'category': item.product.category,
-                'size': item.size,
-                'quantity': item.quantity,
-                'unitPrice': item.unitPrice,
-                'subtotal': item.subtotal,
-                'notes': item.notes,
-              },
-            )
-            .toList(),
-        'subtotal': subtotal,
-        'deliveryFee': deliveryFee,
-        'total': subtotal + deliveryFee,
-        'branchId': branch.id,
-        'branchName': branch.name,
-        'deliveryType': deliveryType,
-        if (pickupToken != null) 'pickupToken': pickupToken,
-        if (referencePhotoPath != null)
-          'referencePhotoPath': referencePhotoPath,
-        'address': address,
-        'deliveryLatitude': deliveryLatitude,
-        'deliveryLongitude': deliveryLongitude,
-        'payment': payment,
-        'notes': notes,
-        'status': 'Pendiente',
-        'createdAt': FieldValue.serverTimestamp(),
-        'updatedAt': FieldValue.serverTimestamp(),
-        'business': {
-          'name': 'Pizzería-Restaurant Mr. Apache',
-          'legalName': 'Inversiones Cesarvero S.A.C.',
-          'ruc': '20612033111',
-        },
-      });
-    } catch (error, stackTrace) {
-      if (referencePhotoPath != null) {
-        try {
-          await storage.ref(referencePhotoPath).delete();
-        } catch (cleanupError) {
-          throw StateError(
-            'No se pudo guardar el pedido ($error) ni limpiar su foto temporal ($cleanupError).',
-          );
-        }
-      }
-      Error.throwWithStackTrace(error, stackTrace);
-    }
+    await document.set({
+      'number': number,
+      'userId': user.uid,
+      'customerName': userData.nombreCompleto.isEmpty
+          ? user.displayName ?? ''
+          : userData.nombreCompleto,
+      'customerFirstName': userData.nombres,
+      'customerLastName': userData.apellidos,
+      'customerPhone': userData.telefono,
+      'items': items
+          .map(
+            (item) => {
+              'productId': item.product.id,
+              'name': item.product.name,
+              'category': item.product.category,
+              'size': item.size,
+              'quantity': item.quantity,
+              'unitPrice': item.unitPrice,
+              'subtotal': item.subtotal,
+              'notes': item.notes,
+            },
+          )
+          .toList(),
+      'subtotal': subtotal,
+      'deliveryFee': deliveryFee,
+      'total': subtotal + deliveryFee,
+      'branchId': branch.id,
+      'branchName': branch.name,
+      'deliveryType': deliveryType,
+      if (pickupToken != null) 'pickupToken': pickupToken,
+      if (referencePhotoBase64 case final photoBase64?) ...{
+        'referencePhotoBase64': photoBase64,
+      },
+      'address': address,
+      'deliveryLatitude': deliveryLatitude,
+      'deliveryLongitude': deliveryLongitude,
+      'payment': payment,
+      'notes': notes,
+      'status': 'Pendiente',
+      'createdAt': FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
+      'business': {
+        'name': 'Pizzería-Restaurant Mr. Apache',
+        'legalName': 'Inversiones Cesarvero S.A.C.',
+        'ruc': '20612033111',
+      },
+    });
   }
 
   Future<void> updateOrderLocation(

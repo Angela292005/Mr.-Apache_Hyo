@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
@@ -31,6 +33,7 @@ import '../utils/formatters.dart'
 import '../utils/pickup_qr.dart';
 import '../utils/drive_image_url.dart';
 import '../utils/product_image_url.dart';
+import '../utils/reference_photo_codec.dart';
 import '../widgets/app_logo.dart';
 import '../widgets/product_image.dart';
 
@@ -2058,8 +2061,8 @@ Future<void> _openCheckout(
     return;
   }
   final form = GlobalKey<FormState>();
-  final address = TextEditingController();
-  final notes = TextEditingController();
+  var addressValue = '';
+  var notesValue = '';
   var type = initialType;
   var payment = 'Efectivo';
   Uint8List? referencePhotoBytes;
@@ -2069,10 +2072,14 @@ Future<void> _openCheckout(
       : branches.first.id;
   var busy = false;
   bool? submitted;
+  final previewWidth = (MediaQuery.sizeOf(screenContext).width - 128)
+      .clamp(0.0, 480.0)
+      .toDouble();
 
   Future<void> pickReferencePhoto(
     ImageSource source,
     StateSetter refresh,
+    BuildContext dialogContext,
   ) async {
     try {
       final image = await ImagePicker().pickImage(
@@ -2081,23 +2088,22 @@ Future<void> _openCheckout(
         maxHeight: 1600,
         imageQuality: 80,
       );
-      if (image == null) return;
-      final bytes = await image.readAsBytes();
-      if (bytes.length > 5 * 1024 * 1024) {
-        if (screenContext.mounted) {
-          showMessage(
-            screenContext,
-            'La foto supera el límite de 5 MB. Elige otra imagen.',
-            error: true,
-          );
-        }
+      if (image == null || !screenContext.mounted || !dialogContext.mounted) {
         return;
       }
-      if (screenContext.mounted) {
-        refresh(() => referencePhotoBytes = bytes);
+      final bytes = await image.readAsBytes();
+      if (!screenContext.mounted || !dialogContext.mounted) return;
+      if (bytes.length > 5 * 1024 * 1024) {
+        showMessage(
+          screenContext,
+          'La foto supera el límite de 5 MB. Elige otra imagen.',
+          error: true,
+        );
+        return;
       }
+      refresh(() => referencePhotoBytes = bytes);
     } catch (error) {
-      if (screenContext.mounted) {
+      if (screenContext.mounted && dialogContext.mounted) {
         showMessage(
           screenContext,
           'No se pudo seleccionar la foto: $error',
@@ -2107,330 +2113,339 @@ Future<void> _openCheckout(
     }
   }
 
-  try {
-    submitted = await showDialog<bool>(
-      context: screenContext,
-      barrierDismissible: false,
-      builder: (dialogRouteContext) => StatefulBuilder(
-        builder: (_, refresh) {
-          final branch = branches.firstWhere(
-            (item) => item.id == selectedBranchId,
-          );
-          final fee = type != 'Delivery' || cart.subtotal >= 50 ? 0.0 : 3.0;
-          return AlertDialog(
-            title: const Text('Confirma tu pedido'),
-            content: Form(
-              key: form,
-              child: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    DropdownButtonFormField<String>(
-                      isExpanded: true,
-                      initialValue: selectedBranchId,
-                      decoration: const InputDecoration(labelText: 'Sucursal'),
-                      items: branches
-                          .map(
-                            (item) => DropdownMenuItem(
-                              value: item.id,
-                              child: Text(
-                                item.name,
-                                overflow: TextOverflow.ellipsis,
-                              ),
+  submitted = await showDialog<bool>(
+    context: screenContext,
+    barrierDismissible: false,
+    builder: (dialogRouteContext) => StatefulBuilder(
+      builder: (dialogContext, refresh) {
+        final branch = branches.firstWhere(
+          (item) => item.id == selectedBranchId,
+        );
+        final fee = type != 'Delivery' || cart.subtotal >= 50 ? 0.0 : 3.0;
+        return AlertDialog(
+          title: const Text('Confirma tu pedido'),
+          content: Form(
+            key: form,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  DropdownButtonFormField<String>(
+                    isExpanded: true,
+                    initialValue: selectedBranchId,
+                    decoration: const InputDecoration(labelText: 'Sucursal'),
+                    items: branches
+                        .map(
+                          (item) => DropdownMenuItem(
+                            value: item.id,
+                            child: Text(
+                              item.name,
+                              overflow: TextOverflow.ellipsis,
                             ),
-                          )
-                          .toList(),
-                      onChanged: (value) => refresh(
-                        () => selectedBranchId = value ?? selectedBranchId,
+                          ),
+                        )
+                        .toList(),
+                    onChanged: (value) => refresh(
+                      () => selectedBranchId = value ?? selectedBranchId,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  DropdownButtonFormField<String>(
+                    isExpanded: true,
+                    initialValue: type,
+                    decoration: const InputDecoration(
+                      labelText: 'Tipo de pedido',
+                    ),
+                    items: const [
+                      DropdownMenuItem(
+                        value: 'Delivery',
+                        child: Text('Delivery'),
                       ),
+                      DropdownMenuItem(
+                        value: 'Recojo en tienda',
+                        child: Text('Recojo en tienda'),
+                      ),
+                    ],
+                    onChanged: (value) => refresh(() {
+                      type = value ?? type;
+                      if (type != 'Delivery') referencePhotoBytes = null;
+                    }),
+                  ),
+                  if (type == 'Delivery') ...[
+                    const SizedBox(height: 10),
+                    TextFormField(
+                      decoration: const InputDecoration(
+                        labelText: 'Dirección de entrega',
+                      ),
+                      onSaved: (value) => addressValue = value?.trim() ?? '',
+                      validator: (value) =>
+                          type == 'Delivery' &&
+                              (value == null || value.trim().length < 6)
+                          ? 'Indica una dirección completa.'
+                          : null,
                     ),
                     const SizedBox(height: 10),
-                    DropdownButtonFormField<String>(
-                      isExpanded: true,
-                      initialValue: type,
-                      decoration: const InputDecoration(
-                        labelText: 'Tipo de pedido',
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFFF8F3),
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: const Color(0xFFEAD8CC)),
                       ),
-                      items: const [
-                        DropdownMenuItem(
-                          value: 'Delivery',
-                          child: Text('Delivery'),
-                        ),
-                        DropdownMenuItem(
-                          value: 'Recojo en tienda',
-                          child: Text('Recojo en tienda'),
-                        ),
-                      ],
-                      onChanged: (value) => refresh(() {
-                        type = value ?? type;
-                        if (type != 'Delivery') referencePhotoBytes = null;
-                      }),
-                    ),
-                    if (type == 'Delivery') ...[
-                      const SizedBox(height: 10),
-                      TextFormField(
-                        controller: address,
-                        decoration: const InputDecoration(
-                          labelText: 'Dirección de entrega',
-                        ),
-                        validator: (value) =>
-                            type == 'Delivery' &&
-                                (value == null || value.trim().length < 6)
-                            ? 'Indica una dirección completa.'
-                            : null,
-                      ),
-                      const SizedBox(height: 10),
-                      Container(
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFFFFF8F3),
-                          borderRadius: BorderRadius.circular(16),
-                          border: Border.all(color: const Color(0xFFEAD8CC)),
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            Row(
-                              children: [
-                                Container(
-                                  width: 38,
-                                  height: 38,
-                                  decoration: BoxDecoration(
-                                    color: Colors.white,
-                                    borderRadius: BorderRadius.circular(12),
-                                  ),
-                                  child: const Icon(
-                                    Icons.add_a_photo_outlined,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Row(
+                            children: [
+                              Container(
+                                width: 38,
+                                height: 38,
+                                decoration: BoxDecoration(
+                                  color: Colors.white,
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                child: const Icon(
+                                  Icons.add_a_photo_outlined,
+                                  color: AppTheme.red,
+                                ),
+                              ),
+                              const SizedBox(width: 10),
+                              const Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      'Foto de referencia',
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.w800,
+                                      ),
+                                    ),
+                                    Text(
+                                      'Opcional',
+                                      style: TextStyle(fontSize: 11),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              if (referencePhotoBytes != null)
+                                IconButton(
+                                  tooltip: 'Quitar foto',
+                                  onPressed: () =>
+                                      refresh(() => referencePhotoBytes = null),
+                                  icon: const Icon(
+                                    Icons.close,
                                     color: AppTheme.red,
                                   ),
                                 ),
-                                const SizedBox(width: 10),
-                                const Expanded(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      Text(
-                                        'Foto de referencia',
-                                        style: TextStyle(
-                                          fontWeight: FontWeight.w800,
-                                        ),
-                                      ),
-                                      Text(
-                                        'Opcional',
-                                        style: TextStyle(fontSize: 11),
-                                      ),
-                                    ],
+                            ],
+                          ),
+                          if (referencePhotoBytes case final photo?) ...[
+                            const SizedBox(height: 10),
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(12),
+                              child: Image.memory(
+                                photo,
+                                width: previewWidth,
+                                height: 138,
+                                fit: BoxFit.cover,
+                                errorBuilder: (_, _, _) => const SizedBox(
+                                  height: 138,
+                                  child: Center(
+                                    child: Text(
+                                      'No se pudo mostrar la vista previa.',
+                                    ),
                                   ),
                                 ),
-                                if (referencePhotoBytes != null)
-                                  IconButton(
-                                    tooltip: 'Quitar foto',
-                                    onPressed: () => refresh(
-                                      () => referencePhotoBytes = null,
-                                    ),
-                                    icon: const Icon(
-                                      Icons.close,
-                                      color: AppTheme.red,
-                                    ),
-                                  ),
-                              ],
+                              ),
                             ),
-                            if (referencePhotoBytes case final photo?) ...[
-                              const SizedBox(height: 10),
-                              ClipRRect(
-                                borderRadius: BorderRadius.circular(12),
-                                child: Image.memory(
-                                  photo,
-                                  height: 138,
-                                  width: double.infinity,
-                                  fit: BoxFit.cover,
+                          ],
+                          const SizedBox(height: 10),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: OutlinedButton.icon(
+                                  onPressed: busy
+                                      ? null
+                                      : () => pickReferencePhoto(
+                                          ImageSource.camera,
+                                          refresh,
+                                          dialogContext,
+                                        ),
+                                  icon: const Icon(
+                                    Icons.camera_alt_outlined,
+                                    size: 18,
+                                  ),
+                                  label: const Text('Tomar foto'),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: OutlinedButton.icon(
+                                  onPressed: busy
+                                      ? null
+                                      : () => pickReferencePhoto(
+                                          ImageSource.gallery,
+                                          refresh,
+                                          dialogContext,
+                                        ),
+                                  icon: const Icon(
+                                    Icons.photo_library_outlined,
+                                    size: 18,
+                                  ),
+                                  label: const Text('Galería'),
                                 ),
                               ),
                             ],
-                            const SizedBox(height: 10),
-                            Row(
-                              children: [
-                                Expanded(
-                                  child: OutlinedButton.icon(
-                                    onPressed: busy
-                                        ? null
-                                        : () => pickReferencePhoto(
-                                            ImageSource.camera,
-                                            refresh,
-                                          ),
-                                    icon: const Icon(
-                                      Icons.camera_alt_outlined,
-                                      size: 18,
-                                    ),
-                                    label: const Text('Tomar foto'),
-                                  ),
-                                ),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: OutlinedButton.icon(
-                                    onPressed: busy
-                                        ? null
-                                        : () => pickReferencePhoto(
-                                            ImageSource.gallery,
-                                            refresh,
-                                          ),
-                                    icon: const Icon(
-                                      Icons.photo_library_outlined,
-                                      size: 18,
-                                    ),
-                                    label: const Text('Galería'),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ],
-                        ),
-                      ),
-                      if (!branch.acceptsDelivery)
-                        const Text(
-                          'Esta sucursal no acepta delivery.',
-                          style: TextStyle(color: AppTheme.red),
-                        ),
-                    ],
-                    const SizedBox(height: 10),
-                    DropdownButtonFormField<String>(
-                      isExpanded: true,
-                      initialValue: payment,
-                      decoration: const InputDecoration(
-                        labelText: 'Método de pago',
-                      ),
-                      items: const [
-                        DropdownMenuItem(
-                          value: 'Efectivo',
-                          child: Text('Efectivo'),
-                        ),
-                        DropdownMenuItem(
-                          value: 'Yape/Plin',
-                          child: Text('Yape / Plin'),
-                        ),
-                        DropdownMenuItem(
-                          value: 'Tarjeta Visa',
-                          child: Text('Tarjeta Visa (al recibir)'),
-                        ),
-                      ],
-                      onChanged: (value) =>
-                          refresh(() => payment = value ?? payment),
-                    ),
-                    const SizedBox(height: 10),
-                    TextFormField(
-                      controller: notes,
-                      decoration: const InputDecoration(
-                        labelText: 'Notas del pedido (opcional)',
+                          ),
+                        ],
                       ),
                     ),
-                    const SizedBox(height: 10),
-                    Text(
-                      'Envío: ${money(fee)}${fee == 0 ? ' (gratis desde S/ 50.00)' : ''}\n'
-                      'Total: ${money(cart.subtotal + fee)}',
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(fontWeight: FontWeight.bold),
-                    ),
+                    if (!branch.acceptsDelivery)
+                      const Text(
+                        'Esta sucursal no acepta delivery.',
+                        style: TextStyle(color: AppTheme.red),
+                      ),
                   ],
-                ),
+                  const SizedBox(height: 10),
+                  DropdownButtonFormField<String>(
+                    isExpanded: true,
+                    initialValue: payment,
+                    decoration: const InputDecoration(
+                      labelText: 'Método de pago',
+                    ),
+                    items: const [
+                      DropdownMenuItem(
+                        value: 'Efectivo',
+                        child: Text('Efectivo'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'Yape/Plin',
+                        child: Text('Yape / Plin'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'Tarjeta Visa',
+                        child: Text('Tarjeta Visa (al recibir)'),
+                      ),
+                    ],
+                    onChanged: (value) =>
+                        refresh(() => payment = value ?? payment),
+                  ),
+                  const SizedBox(height: 10),
+                  TextFormField(
+                    decoration: const InputDecoration(
+                      labelText: 'Notas del pedido (opcional)',
+                    ),
+                    onSaved: (value) => notesValue = value?.trim() ?? '',
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    'Envío: ${money(fee)}${fee == 0 ? ' (gratis desde S/ 50.00)' : ''}\n'
+                    'Total: ${money(cart.subtotal + fee)}',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ],
               ),
             ),
-            actions: [
-              TextButton(
-                onPressed: busy
-                    ? null
-                    : () => Navigator.of(dialogRouteContext).pop(),
-                child: const Text('Volver'),
-              ),
-              FilledButton(
-                onPressed: busy
-                    ? null
-                    : () async {
-                        if (!form.currentState!.validate()) return;
-                        if (!branch.isOpen) {
-                          showMessage(
-                            screenContext,
-                            'La sucursal está cerrada. Solo aceptamos pedidos durante su horario.',
-                            error: true,
-                          );
-                          return;
-                        }
-                        if (type == 'Delivery' && !branch.acceptsDelivery) {
-                          showMessage(
-                            screenContext,
-                            'Esta sucursal no acepta delivery.',
-                            error: true,
-                          );
-                          return;
-                        }
-                        refresh(() => busy = true);
-                        try {
-                          double? deliveryLatitude;
-                          double? deliveryLongitude;
-                          if (type == 'Delivery') {
-                            var permission = await Geolocator.checkPermission();
-                            if (permission == LocationPermission.denied) {
-                              permission = await Geolocator.requestPermission();
-                            }
-                            if (permission == LocationPermission.denied ||
-                                permission ==
-                                    LocationPermission.deniedForever) {
-                              throw Exception(
-                                'Activa el permiso de ubicación para compartir tu dirección de entrega.',
-                              );
-                            }
-                            final position =
-                                await Geolocator.getCurrentPosition();
-                            deliveryLatitude = position.latitude;
-                            deliveryLongitude = position.longitude;
+          ),
+          actions: [
+            TextButton(
+              onPressed: busy
+                  ? null
+                  : () => Navigator.of(dialogRouteContext).pop(),
+              child: const Text('Volver'),
+            ),
+            FilledButton(
+              onPressed: busy
+                  ? null
+                  : () async {
+                      if (!form.currentState!.validate()) return;
+                      form.currentState!.save();
+                      if (!branch.isOpen) {
+                        showMessage(
+                          screenContext,
+                          'La sucursal está cerrada. Solo aceptamos pedidos durante su horario.',
+                          error: true,
+                        );
+                        return;
+                      }
+                      if (type == 'Delivery' && !branch.acceptsDelivery) {
+                        showMessage(
+                          screenContext,
+                          'Esta sucursal no acepta delivery.',
+                          error: true,
+                        );
+                        return;
+                      }
+                      refresh(() => busy = true);
+                      try {
+                        double? deliveryLatitude;
+                        double? deliveryLongitude;
+                        if (type == 'Delivery') {
+                          var permission = await Geolocator.checkPermission();
+                          if (permission == LocationPermission.denied) {
+                            permission = await Geolocator.requestPermission();
                           }
-                          await firebaseService.submitOrder(
-                            items: cart.items,
-                            branch: branch,
-                            deliveryType: type,
-                            address: type == 'Delivery'
-                                ? address.text.trim()
-                                : '',
-                            payment: payment,
-                            notes: notes.text.trim(),
-                            deliveryFee: fee,
-                            deliveryLatitude: deliveryLatitude,
-                            deliveryLongitude: deliveryLongitude,
-                            deliveryReferencePhoto: referencePhotoBytes,
-                          );
-                          if (dialogRouteContext.mounted) {
-                            Navigator.of(dialogRouteContext).pop(true);
-                          }
-                        } catch (error) {
-                          if (dialogRouteContext.mounted) {
-                            refresh(() => busy = false);
-                          }
-                          if (screenContext.mounted) {
-                            showMessage(
-                              screenContext,
-                              'No se pudo guardar el pedido: $error',
-                              error: true,
+                          if (permission == LocationPermission.denied ||
+                              permission == LocationPermission.deniedForever) {
+                            throw Exception(
+                              'Activa el permiso de ubicación para compartir tu dirección de entrega.',
                             );
                           }
+                          final position =
+                              await Geolocator.getCurrentPosition();
+                          deliveryLatitude = position.latitude;
+                          deliveryLongitude = position.longitude;
                         }
-                      },
-                child: busy
-                    ? const SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Text('Confirmar pedido'),
-              ),
-            ],
-          );
-        },
-      ),
-    );
-  } finally {
-    address.dispose();
-    notes.dispose();
-  }
+                        await firebaseService.submitOrder(
+                          items: cart.items,
+                          branch: branch,
+                          deliveryType: type,
+                          address: type == 'Delivery' ? addressValue : '',
+                          payment: payment,
+                          notes: notesValue,
+                          deliveryFee: fee,
+                          deliveryLatitude: deliveryLatitude,
+                          deliveryLongitude: deliveryLongitude,
+                          deliveryReferencePhoto: referencePhotoBytes,
+                        );
+                        if (dialogRouteContext.mounted) {
+                          Navigator.of(dialogRouteContext).pop(true);
+                        }
+                      } catch (error) {
+                        if (!dialogRouteContext.mounted) return;
+                        refresh(() => busy = false);
+                        await showDialog<void>(
+                          context: dialogRouteContext,
+                          builder: (errorContext) => AlertDialog(
+                            title: const Text('No se pudo guardar el pedido'),
+                            content: SingleChildScrollView(
+                              child: SelectableText('$error'),
+                            ),
+                            actions: [
+                              TextButton(
+                                onPressed: () =>
+                                    Navigator.of(errorContext).pop(),
+                                child: const Text('Entendido'),
+                              ),
+                            ],
+                          ),
+                        );
+                      }
+                    },
+              child: busy
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Text('Confirmar pedido'),
+            ),
+          ],
+        );
+      },
+    ),
+  );
   if (submitted == true && screenContext.mounted) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!screenContext.mounted) return;
@@ -3002,6 +3017,62 @@ class LiveDeliveryMap extends StatelessWidget {
   }
 }
 
+Widget _orderReferencePhoto(OrderRecord order) {
+  if (order.referencePhotoBase64.isNotEmpty) {
+    try {
+      final bytes = base64Decode(order.referencePhotoBase64);
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(14),
+        child: Image.memory(
+          bytes,
+          height: 180,
+          width: double.infinity,
+          fit: BoxFit.cover,
+          errorBuilder: (_, _, _) => const Padding(
+            padding: EdgeInsets.all(12),
+            child: Text('No se pudo mostrar la foto de referencia.'),
+          ),
+        ),
+      );
+    } on FormatException {
+      return const Text(
+        'No se pudo cargar la foto de referencia.',
+        style: TextStyle(color: AppTheme.red),
+      );
+    }
+  }
+
+  return FutureBuilder<String>(
+    future: FirebaseStorage.instance
+        .ref(order.referencePhotoPath)
+        .getDownloadURL(),
+    builder: (context, photoSnapshot) {
+      if (photoSnapshot.hasError) {
+        return const Text(
+          'No se pudo cargar la foto de referencia.',
+          style: TextStyle(color: AppTheme.red),
+        );
+      }
+      if (!photoSnapshot.hasData) {
+        return const LinearProgressIndicator();
+      }
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(14),
+        child: Image.network(
+          photoSnapshot.data!,
+          height: 180,
+          width: double.infinity,
+          fit: BoxFit.cover,
+          errorBuilder: (_, _, _) => const Padding(
+            padding: EdgeInsets.all(12),
+            child: Text('No se pudo mostrar la foto de referencia.'),
+          ),
+        ),
+      );
+    },
+  );
+}
+
 class OrderTile extends StatelessWidget {
   const OrderTile({
     super.key,
@@ -3188,7 +3259,8 @@ class OrderTile extends StatelessWidget {
               alignment: Alignment.centerLeft,
               child: Text('Dirección: ${order.address}'),
             ),
-          if (order.referencePhotoPath.isNotEmpty) ...[
+          if (order.referencePhotoBase64.isNotEmpty ||
+              order.referencePhotoPath.isNotEmpty) ...[
             const SizedBox(height: 10),
             const Align(
               alignment: Alignment.centerLeft,
@@ -3198,35 +3270,7 @@ class OrderTile extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 6),
-            FutureBuilder<String>(
-              future: FirebaseStorage.instance
-                  .ref(order.referencePhotoPath)
-                  .getDownloadURL(),
-              builder: (context, photoSnapshot) {
-                if (photoSnapshot.hasError) {
-                  return const Text(
-                    'No se pudo cargar la foto de referencia.',
-                    style: TextStyle(color: AppTheme.red),
-                  );
-                }
-                if (!photoSnapshot.hasData) {
-                  return const LinearProgressIndicator();
-                }
-                return ClipRRect(
-                  borderRadius: BorderRadius.circular(14),
-                  child: Image.network(
-                    photoSnapshot.data!,
-                    height: 180,
-                    width: double.infinity,
-                    fit: BoxFit.cover,
-                    errorBuilder: (_, _, _) => const Padding(
-                      padding: EdgeInsets.all(12),
-                      child: Text('No se pudo mostrar la foto de referencia.'),
-                    ),
-                  ),
-                );
-              },
-            ),
+            _orderReferencePhoto(order),
           ],
           const SizedBox(height: 8),
           ...order.items.map(
@@ -3394,7 +3438,7 @@ class OrderTile extends StatelessWidget {
   }
 }
 
-class ProfileScreen extends StatelessWidget {
+class ProfileScreen extends StatefulWidget {
   const ProfileScreen({
     super.key,
     required this.profile,
@@ -3404,26 +3448,273 @@ class ProfileScreen extends StatelessWidget {
   final bool isAdmin;
 
   @override
+  State<ProfileScreen> createState() => _ProfileScreenState();
+}
+
+enum _ProfilePhotoAction { camera, gallery, remove }
+
+class _ProfileScreenState extends State<ProfileScreen> {
+  bool _savingProfilePhoto = false;
+
+  Future<void> _chooseProfilePhoto() async {
+    final user = UserModel.fromMap(widget.profile);
+    final action = await showModalBottomSheet<_ProfilePhotoAction>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.camera_alt_outlined),
+              title: const Text('Tomar una foto'),
+              onTap: () =>
+                  Navigator.of(sheetContext).pop(_ProfilePhotoAction.camera),
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo_library_outlined),
+              title: const Text('Elegir de la galería'),
+              onTap: () =>
+                  Navigator.of(sheetContext).pop(_ProfilePhotoAction.gallery),
+            ),
+            if (user.fotoPerfilBase64.isNotEmpty)
+              ListTile(
+                leading: const Icon(Icons.delete_outline, color: Colors.red),
+                title: const Text(
+                  'Quitar foto',
+                  style: TextStyle(color: Colors.red),
+                ),
+                onTap: () =>
+                    Navigator.of(sheetContext).pop(_ProfilePhotoAction.remove),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (action == null || !mounted) return;
+
+    if (action == _ProfilePhotoAction.remove) {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Quitar foto de perfil'),
+          content: const Text('¿Quieres eliminar tu foto de perfil?'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Cancelar'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('Quitar'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true || !mounted) return;
+
+      setState(() => _savingProfilePhoto = true);
+      try {
+        await firebaseService.removeProfilePhoto();
+        if (mounted) showMessage(context, 'Foto de perfil eliminada.');
+      } catch (error) {
+        if (mounted) {
+          showMessage(
+            context,
+            'No se pudo quitar la foto de perfil: $error',
+            error: true,
+          );
+        }
+      } finally {
+        if (mounted) setState(() => _savingProfilePhoto = false);
+      }
+      return;
+    }
+
+    setState(() => _savingProfilePhoto = true);
+    try {
+      final photo = await ImagePicker().pickImage(
+        source: action == _ProfilePhotoAction.camera
+            ? ImageSource.camera
+            : ImageSource.gallery,
+        maxWidth: 1600,
+        maxHeight: 1600,
+        imageQuality: 80,
+      );
+      if (photo == null) return;
+
+      final bytes = await photo.readAsBytes();
+      final compressed = await compute(compressReferencePhoto, bytes);
+      await firebaseService.updateProfilePhoto(base64Encode(compressed));
+      if (mounted) showMessage(context, 'Foto de perfil actualizada.');
+    } catch (error) {
+      if (mounted) {
+        showMessage(
+          context,
+          'No se pudo guardar la foto de perfil: $error',
+          error: true,
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _savingProfilePhoto = false);
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final profile = widget.profile;
     final user = UserModel.fromMap(profile);
+    Uint8List? photoBytes;
+    String? photoError;
+    if (user.fotoPerfilBase64.isNotEmpty) {
+      try {
+        photoBytes = base64Decode(user.fotoPerfilBase64);
+      } on FormatException {
+        photoError = 'La foto guardada no tiene un formato válido.';
+      }
+    }
+    final initials = user.nombres.isEmpty ? 'M' : user.nombres[0].toUpperCase();
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
-        CircleAvatar(
-          radius: 34,
-          backgroundColor: AppTheme.red,
-          child: Text(
-            user.nombres.isEmpty ? 'M' : user.nombres[0].toUpperCase(),
-            style: const TextStyle(color: Colors.white, fontSize: 28),
+        Container(
+          padding: const EdgeInsets.all(20),
+          decoration: BoxDecoration(
+            gradient: const LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [AppTheme.red, Color(0xFF5C160D)],
+            ),
+            borderRadius: BorderRadius.circular(24),
+            boxShadow: const [
+              BoxShadow(
+                color: Color(0x26971F0C),
+                blurRadius: 18,
+                offset: Offset(0, 8),
+              ),
+            ],
+          ),
+          child: Column(
+            children: [
+              Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(4),
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.white, width: 2),
+                    ),
+                    child: CircleAvatar(
+                      radius: 48,
+                      backgroundColor: const Color(0xFFFFEEE6),
+                      child: photoBytes == null
+                          ? Text(
+                              initials,
+                              style: const TextStyle(
+                                color: AppTheme.red,
+                                fontSize: 34,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            )
+                          : ClipOval(
+                              child: Image.memory(
+                                photoBytes,
+                                width: 96,
+                                height: 96,
+                                fit: BoxFit.cover,
+                                errorBuilder: (_, _, _) => Center(
+                                  child: Text(
+                                    initials,
+                                    style: const TextStyle(
+                                      color: AppTheme.red,
+                                      fontSize: 34,
+                                      fontWeight: FontWeight.w800,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                    ),
+                  ),
+                  if (profile['role'] != 'visitante')
+                    Positioned(
+                      right: 0,
+                      bottom: 0,
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: AppTheme.amber,
+                          shape: BoxShape.circle,
+                          border: Border.all(color: Colors.white, width: 2),
+                        ),
+                        child: IconButton(
+                          tooltip: 'Cambiar foto de perfil',
+                          onPressed: _savingProfilePhoto
+                              ? null
+                              : _chooseProfilePhoto,
+                          constraints: const BoxConstraints.tightFor(
+                            width: 42,
+                            height: 42,
+                          ),
+                          padding: EdgeInsets.zero,
+                          icon: _savingProfilePhoto
+                              ? const SizedBox(
+                                  width: 18,
+                                  height: 18,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Icon(Icons.camera_alt_rounded, size: 20),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 14),
+              Text(
+                user.nombreCompleto.isEmpty ? 'Cliente' : user.nombreCompleto,
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 3),
+              Text(
+                user.correo,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Color(0xFFEEDBD5)),
+              ),
+              if (photoError != null) ...[
+                const SizedBox(height: 6),
+                Text(
+                  photoError,
+                  style: const TextStyle(color: Color(0xFFFFD8CF)),
+                ),
+              ],
+              if (profile['role'] != 'visitante') ...[
+                const SizedBox(height: 14),
+                OutlinedButton.icon(
+                  onPressed: _savingProfilePhoto ? null : _chooseProfilePhoto,
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.white,
+                    side: const BorderSide(color: Color(0xB3FFFFFF)),
+                    minimumSize: const Size(double.infinity, 46),
+                  ),
+                  icon: const Icon(Icons.photo_camera_outlined, size: 19),
+                  label: Text(
+                    _savingProfilePhoto
+                        ? 'Guardando foto...'
+                        : photoBytes == null
+                        ? 'Agregar foto de perfil'
+                        : 'Cambiar foto',
+                  ),
+                ),
+              ],
+            ],
           ),
         ),
-        const SizedBox(height: 8),
-        Text(
-          user.nombreCompleto.isEmpty ? 'Cliente' : user.nombreCompleto,
-          textAlign: TextAlign.center,
-          style: Theme.of(context).textTheme.titleLarge,
-        ),
-        Text(user.correo, textAlign: TextAlign.center),
         const SizedBox(height: 16),
         Card(
           child: Column(
@@ -3481,7 +3772,7 @@ class ProfileScreen extends StatelessWidget {
                   MaterialPageRoute(builder: (_) => const CompanyScreen()),
                 ),
               ),
-              if (isAdmin) ...[
+              if (widget.isAdmin) ...[
                 const Divider(height: 1),
                 ListTile(
                   leading: const Icon(Icons.admin_panel_settings_outlined),
